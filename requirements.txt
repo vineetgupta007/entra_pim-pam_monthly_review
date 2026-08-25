@@ -1,0 +1,17 @@
+# Python 3.9 or newer (zoneinfo is used for the off-hours business-hours test).
+#
+#   python -m venv .venv
+#   .venv\Scripts\activate        # Windows
+#   source .venv/bin/activate     # macOS / Linux
+#   pip install -r requirements.txt
+
+requests>=2.28          # Graph paged GETs, unattended token requests
+msal>=1.26              # interactive browser sign-in (the default auth mode)
+pandas>=1.5             # correlation joins
+openpyxl>=3.1           # findings workbook
+python-docx>=0.8.11     # executive summary
+
+# Only needed if scripts/config.json sets auth.mode to "certificate".
+# Uncomment to use certificate credentials instead of a client secret.
+# pyjwt>=2.6
+# cryptography>=39

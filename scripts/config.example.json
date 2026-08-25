@@ -1,0 +1,36 @@
+{
+  "_comment": "Copy to config.json and fill in tenant_id and client_id. config.json is gitignored - never commit real values. No secret is stored in this file.",
+
+  "tenant_id": "REPLACE_WITH_TENANT_GUID",
+  "client_id": "REPLACE_WITH_APP_REGISTRATION_CLIENT_ID",
+
+  "auth": {
+    "_mode_options": "interactive | secret_env | certificate. Override for one run with --auth-mode.",
+    "mode": "interactive",
+
+    "_interactive_notes": "Opens your browser. Needs DELEGATED AuditLog.Read.All, Directory.Read.All, RoleManagement.Read.Directory (admin-consented) AND a 'http://localhost' redirect URI under 'Mobile and desktop applications'. The signed-in user must also hold Global Reader, Reports Reader, or Security Reader - consent alone is not enough.",
+    "cache_tokens": true,
+    "token_cache_path": null,
+
+    "_unattended_notes": "secret_env and certificate use APPLICATION permissions of the same three names. Task Scheduler does not inherit your shell's environment, so set the secret as a persistent user or machine variable - or prefer certificate mode.",
+    "secret_env_var": "ENTRA_CLIENT_SECRET",
+    "certificate_pem_path": null,
+    "certificate_thumbprint": null
+  },
+
+  "activation_window_hours": 8,
+  "reporting_timezone": "UTC",
+
+  "business_hours": {
+    "start_hour": 8,
+    "end_hour": 18,
+    "workdays": [0, 1, 2, 3, 4]
+  },
+
+  "break_glass_accounts": [],
+
+  "roles_in_scope": [],
+
+  "weak_justification_min_chars": 15,
+  "weak_justification_phrases": ["test", "testing", "n/a", "na", "none", "asdf", "work", "task", "-", "."]
+}

@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Credentials - never commit
+# ---------------------------------------------------------------------------
+scripts/config.json
+*.pem
+*.pfx
+*.key
+*.cer
+.env
+
+# MSAL token cache. Default location is outside the repo (%LOCALAPPDATA% on Windows),
+# but this catches the case where token_cache_path is pointed somewhere local.
+msal_cache.json
+*.msal_cache.json
+
+# ---------------------------------------------------------------------------
+# Cycle data - contains privileged account UPNs, object IDs, and justification
+# text. This is an inventory of who holds admin rights in the tenant; it does
+# not belong in source control, public or private.
+#
+# Month folders (August/, August-2/, ...) are created on demand by the scripts,
+# so a fresh clone needs nothing here.
+# ---------------------------------------------------------------------------
+*/input/
+*/output/
+*.xlsx
+*.docx
+!scripts/**/*.example.*
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# Editor / OS scratch
+# ---------------------------------------------------------------------------
+.~lock.*#
+~$*
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local skill install (canonical copy lives in skills/) and scheduler logs
+.claude/
+logs/

@@ -62,7 +62,7 @@ gate. That is what the `entra-pim-monthly-review` skill drives — see `../skill
 
 ```bash
 git clone <repo> && cd entra_pim-pam_monthly_review
-python -m venv .venv && .venv\Scripts\activate     # Windows; source .venv/bin/activate elsewhere
+python -m venv .venv && .venv/Scripts/activate     # Windows; source .venv/bin/activate elsewhere
 pip install -r requirements.txt                    # Python 3.9+
 cp scripts/config.example.json scripts/config.json # then fill in tenant_id and client_id
 python scripts/check_auth.py                       # prove access before exporting anything

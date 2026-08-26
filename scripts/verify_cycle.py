@@ -3,13 +3,23 @@
 Checks (CLAUDE.md verification rule):
   1. Row counts reconcile: raw source -> deduped -> anchors -> workbook sheets.
   2. No duplicate rows in any output sheet.
-  3. Exception totals match the Summary sheet's live formulas.
+  3. Exception totals and severity counts agree between correlation-stats and the CSVs.
   4. Every input file appears in export-manifest.json.
   5. No orphan references: every activation_id used in correlated/exception rows exists.
   6. Every correlated action falls inside its activation's stated window.
-  7. Workbook formulas evaluate without error (requires a prior recalculation).
+  7. Every Summary formula, recomputed from the source CSVs, agrees with correlation-stats.
 
 Exits non-zero if any check fails, so it can gate a scheduled run.
+
+On check 7 and cached values: the Summary sheet holds live formulas by design, and
+openpyxl writes formulas without computing them - so a freshly built workbook has no
+cached formula values at all. Checks that compared against those cached values used to
+skip silently while still reporting PASS, which meant a tampered or stale Exceptions
+sheet could clear the gate. correlation-stats-<label>.json is the authority for every
+figure the reports use, so formulas are now recomputed from the CSVs and compared against
+stats instead. Cached values are still checked when present (after Excel or LibreOffice
+has opened the file), but nothing depends on them, and a run where no formula could be
+compared to anything is a failure rather than a pass.
 """
 
 from __future__ import annotations
@@ -65,6 +75,57 @@ def eval_count_formula(formula: str, frames: dict[str, pd.DataFrame]) -> int | N
         if i >= len(df.columns):
             return None
         return int((df.iloc[:, i].astype(str).str.strip() == criterion).sum())
+    return None
+
+
+def summary_expectations(stats: dict) -> dict[str, int]:
+    """Map each Summary row label to the authoritative figure in correlation-stats.
+
+    correlation-stats-<label>.json is written by correlate.py and is the single source of
+    truth for every count the reports use, so it can verify the workbook's formulas
+    without the workbook needing cached formula values.
+
+    Severity and exception-class rows are expanded from their stats dictionaries; a label
+    absent from stats maps to 0, because a COUNTIF for a class with no rows should return
+    0 rather than be skipped.
+    """
+    exp: dict[str, int] = {}
+
+    if "activations_successful" in stats:
+        exp["Successful activations"] = int(stats["activations_successful"])
+    by_role = stats.get("by_role") or {}
+    if by_role:
+        exp["Global Administrator activations"] = int(by_role.get("Global Administrator", 0))
+    if "exception_rows" in stats:
+        exp["Total exceptions"] = int(stats["exception_rows"])
+
+    by_sev = stats.get("exceptions_by_severity")
+    if isinstance(by_sev, dict):
+        for name in ("High", "Medium", "Low", "Informational"):
+            exp[name] = int(by_sev.get(name, 0))
+
+    by_class = stats.get("exceptions_by_class")
+    if isinstance(by_class, dict):
+        for name, count in by_class.items():
+            exp[str(name)] = int(count)
+
+    return exp
+
+
+CLASS_LABEL_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
+
+
+def expected_value(label: str, expectations: dict[str, int], stats: dict) -> int | None:
+    """Authoritative value for a Summary label, or None if stats cannot speak to it.
+
+    A snake_case label is an exception class. correlate.py only records classes that
+    occurred, so a class absent from stats legitimately expects 0 - returning None there
+    would let a stale non-zero formula slip through unchecked.
+    """
+    if label in expectations:
+        return expectations[label]
+    if CLASS_LABEL_RE.match(label) and isinstance(stats.get("exceptions_by_class"), dict):
+        return 0
     return None
 
 
@@ -134,49 +195,85 @@ def main() -> int:
                 a, b = row[0].value, row[1].value
                 if a is not None and b not in (None, ""):
                     summary[str(a).strip()] = b
-            total = summary.get("Total exceptions")
-            if isinstance(total, (int, float)):
-                check(int(total) == len(exc),
-                      "Summary exception total matches Exceptions sheet",
-                      f"summary {int(total)} vs csv {len(exc)}")
-                if not exc.empty:
-                    sev_ok = all(
-                        summary.get(s) == int((exc["severity"] == s).sum())
-                        for s in ("High", "Medium", "Low")
-                        if summary.get(s) is not None)
-                    check(sev_ok, "Summary severity counts match Exceptions sheet")
+            # The Summary sheet holds live formulas by design (CLAUDE.md), and openpyxl
+            # writes formulas without computing them - so data_only=True yields None for
+            # every formula cell until Excel or LibreOffice has opened the file. These
+            # checks must therefore NOT depend on a cached value being present; when they
+            # did, they silently passed without comparing anything.
+            #
+            # correlation-stats-<label>.json is the authority for every figure the reports
+            # use, so each Summary formula is recomputed from the CSVs and compared against
+            # stats. That works with or without cached values, and additionally catches a
+            # formula pointing at the wrong range or criterion.
+            check(int(stats.get("exception_rows", -1)) == len(exc),
+                  "Exception total matches Exceptions sheet",
+                  f"stats {stats.get('exception_rows')} vs csv {len(exc)}")
             if not exc.empty:
-                by_sev = sum(int((exc["severity"] == s).sum())
-                             for s in exc["severity"].unique())
+                stats_sev = stats.get("exceptions_by_severity") or {}
+                csv_sev = {s: int((exc["severity"] == s).sum())
+                           for s in exc["severity"].unique()}
+                mismatched = {s: (stats_sev.get(s), c) for s, c in csv_sev.items()
+                              if int(stats_sev.get(s, -1)) != c}
+                check(not mismatched, "Severity counts match Exceptions sheet",
+                      f"stats vs csv: {mismatched}" if mismatched else
+                      ", ".join(f"{s}={c}" for s, c in sorted(csv_sev.items())))
+                by_sev = sum(csv_sev.values())
                 check(by_sev == len(exc), "Severity buckets sum to total",
                       f"{by_sev} vs {len(exc)}")
-            # Independently re-evaluate the Summary formulas against the CSVs. This does not
-            # need LibreOffice and catches a wrong range or criterion, which a clean
-            # recalculation would not.
+
+            # Re-evaluate every Summary formula against the source CSVs, then compare to
+            # stats (always available) and to the cached value (only after a recalculation).
             frames = {"Activations": acts, "Exceptions": exc,
                       "Correlated Actions": corr, "Uncovered Actions": unc}
+            expected_for = summary_expectations(stats)
             wbf = load_workbook(xlsx, data_only=False)["Summary"]
-            evaluated = wrong = 0
+            evaluated = wrong = compared = cached_hits = unmapped = 0
             for row in wbf.iter_rows(min_row=1, max_row=wbf.max_row, max_col=2):
                 lbl, f = row[0].value, row[1].value
                 if not isinstance(f, str) or not f.startswith("="):
                     continue
-                expected = eval_count_formula(f, frames)
-                if expected is None:
+                recomputed = eval_count_formula(f, frames)
+                if recomputed is None:
                     continue
                 evaluated += 1
-                cached = summary.get(str(lbl).strip())
-                if isinstance(cached, (int, float)) and int(cached) != expected:
-                    wrong += 1
-                    check(False, f"Formula value wrong: {str(lbl).strip()}",
-                          f"workbook {cached} vs recomputed {expected}")
-            check(wrong == 0, "Summary formulas recompute correctly",
-                  f"{evaluated} formulas re-evaluated from source CSVs")
+                name = str(lbl).strip()
 
-            cached_missing = [k for k, v in summary.items() if v is None]
-            if any(isinstance(v, str) and v.startswith("=") for v in summary.values()):
-                print("  NOTE  Summary formulas have no cached values yet. Excel computes "
-                      "them on open; run scripts/recalc.py for a pre-computed file.")
+                authority = expected_value(name, expected_for, stats)
+                if authority is not None:
+                    compared += 1
+                    if int(authority) != recomputed:
+                        wrong += 1
+                        check(False, f"Summary formula disagrees with stats: {name}",
+                              f"stats {authority} vs formula recomputed from CSV {recomputed}")
+                else:
+                    unmapped += 1
+
+                cached = summary.get(name)
+                if isinstance(cached, (int, float)):
+                    cached_hits += 1
+                    if int(cached) != recomputed:
+                        wrong += 1
+                        check(False, f"Cached formula value wrong: {name}",
+                              f"workbook {cached} vs recomputed {recomputed}")
+
+            detail = (f"{compared} of {evaluated} formulas checked against "
+                      f"correlation-stats-{label}.json")
+            if cached_hits:
+                detail += f"; {cached_hits} also matched cached values"
+            if unmapped:
+                detail += f"; {unmapped} had no stats counterpart"
+            # Passing requires that something was actually compared. A run where every
+            # formula was unverifiable is not a pass.
+            check(wrong == 0 and compared > 0, "Summary formulas agree with stats", detail)
+            if unmapped:
+                print(f"  NOTE  {unmapped} Summary formula(s) have no counterpart in "
+                      f"correlation-stats-{label}.json and were recomputed but not "
+                      f"cross-checked.")
+            if not cached_hits and evaluated:
+                print("  NOTE  Summary formulas carry no cached values (openpyxl writes "
+                      "formulas without computing them). Excel computes them on open; the "
+                      "checks above used correlation-stats instead and did not depend on "
+                      "cached values.")
             sheets = set(wb.sheetnames)
             expected = {"Summary", "Activations", "Correlated Actions",
                         "Unmatched Activations", "Uncovered Actions", "Exceptions",

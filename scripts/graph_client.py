@@ -88,6 +88,9 @@ class GraphClient:
         self.mode = self.auth_cfg.get("mode", "interactive")
         self.verbose = verbose
         self.signed_in_as = None  # populated by interactive sign-in
+        # Overridable so publish_month.py can add Sites.ReadWrite.All for delegated
+        # uploads without changing what the read-only export phase requests.
+        self.delegated_scopes = list(DELEGATED_SCOPES)
         self._token = None
         self._expires_at = datetime.now(timezone.utc)
         self.session = requests.Session()
@@ -149,7 +152,7 @@ class GraphClient:
         result = None
         accounts = app.get_accounts()
         if accounts:  # silent renewal from the cached refresh token
-            result = app.acquire_token_silent(DELEGATED_SCOPES, account=accounts[0])
+            result = app.acquire_token_silent(self.delegated_scopes, account=accounts[0])
             if result and self.verbose:
                 print(f"  reused cached sign-in for {accounts[0].get('username')}")
 
@@ -158,7 +161,7 @@ class GraphClient:
                 print("  opening your browser to sign in...")
             try:
                 result = app.acquire_token_interactive(
-                    DELEGATED_SCOPES,
+                    self.delegated_scopes,
                     prompt="select_account",
                     success_template="<html><body><h2>Signed in. You can close this tab "
                                      "and return to the terminal.</h2></body></html>",
@@ -184,7 +187,7 @@ class GraphClient:
                         "desktop applications\".")
             elif "consent" in desc.lower() or err == "invalid_grant":
                 hint = ("\nDelegated permissions may not be consented. Grant admin consent "
-                        f"for: {', '.join(s.rsplit('/', 1)[-1] for s in DELEGATED_SCOPES)}.")
+                        f"for: {', '.join(x.rsplit('/', 1)[-1] for x in self.delegated_scopes)}.")
             raise GraphAuthError(f"Interactive sign-in failed ({err}): {desc}{hint}")
 
         claims = result.get("id_token_claims") or {}

@@ -218,5 +218,54 @@ python verify_cycle.py --month 2026-08
 ```
 
 Checks that row counts reconcile from raw source through to the workbook, that no output
-sheet has duplicate rows, that exception totals match the Summary sheet, and that every
-input file appears in `export-manifest.json`.
+sheet has duplicate rows, that exception totals and severity counts agree between
+`correlation-stats-<label>.json` and the CSVs, that every Summary formula recomputed from
+the source CSVs agrees with stats, and that every input file appears in
+`export-manifest.json`.
+
+The Summary sheet holds live formulas, and openpyxl writes formulas without computing
+them - so a freshly built workbook has no cached formula values. Checks that compared
+against cached values therefore used to skip silently while still reporting PASS, letting
+a stale or tampered Exceptions sheet clear the gate. Verification now recomputes each
+formula from the CSVs and compares it to `correlation-stats`, which is the authority for
+every figure the reports use. Cached values are still checked when present, but no check
+depends on them, and a run where nothing could be compared fails rather than passes.
+
+## Publishing to SharePoint (Phase C)
+
+Publication is a third phase on purpose. It is never part of `run_month.py`, because per
+`CLAUDE.md` anything leaving the project folder is a separate approval, and findings are
+not final if verification fails. Auto-uploading at the end of Phase B would let a cycle
+that failed `verify_cycle.py` reach auditors before anyone read the failure.
+
+```bash
+python publish_month.py --month 2026-08 --check                       # prove access only
+python publish_month.py --month 2026-08 --dry-run                     # preconditions, no upload
+python publish_month.py --month 2026-08 --approved-by "Vineet Gupta"  # publish
+```
+
+Only the two deliverables are published — the workbook and the executive summary. Raw
+exports and intermediate CSVs stay in the project folder; the workbook's `Evidence` sheet
+already reproduces `export-manifest.json`, so an auditor can read the full provenance
+chain from the published file and verify any raw export against the recorded sha256.
+
+Four preconditions, all enforced. Any failure means nothing uploads:
+
+1. `verify_cycle.py` exits zero — re-run at publish time, not trusted from earlier
+2. an approver is named with `--approved-by`
+3. both deliverables exist and the label is a real period, never `-SAMPLE`
+4. the destination folder is empty (a corrected cycle is published as `--run 2`)
+
+On success it writes `publication-receipt-<label>.json` into the cycle's `output/`,
+recording the destination URL, each file's sha256 and item ID, the approver, and the
+timestamp. The receipt's presence means the cycle has been published.
+
+**Permissions.** Unattended modes need the application permission `Sites.Selected`, plus an
+administrator granting this app the `write` role on the one target site. `Sites.Selected`
+grants nothing until that second step happens, which is what makes it safer than a
+tenant-wide `Sites.ReadWrite.All`. Interactive mode instead requests delegated
+`Sites.ReadWrite.All`, and the signed-in user's own library permissions apply on top.
+
+Configure the destination under `sharepoint` in `config.json`. `enabled` stays false until
+the library exists, consent is granted, and a retention label is applied — see
+`docs/entra-pim-sharepoint-publication-design.docx`.

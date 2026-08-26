@@ -16,6 +16,8 @@ Owner: Vineet Gupta (vgupta@caqh.org), CAQH.
 
 A copy also sits at `.claude/skills/entra-pim-monthly-review/` for Claude Code, where project skills load automatically and `/entra-pim-monthly-review` works. Cowork does not load skills from the project folder, so in Cowork this instruction is what wires the procedure in. Both copies must stay in sync — `skills/` is canonical; re-copy after editing it.
 
+**Publishing a cycle to SharePoint.** When Vineet asks to upload a completed review to SharePoint, publish a cycle for the auditors, or asks where auditors can find a month's review — read `skills/entra-pim-publish-sharepoint/SKILL.md` and follow it exactly. Publication is **Phase C**: a separate, explicitly requested step that happens *after* Phase B findings are approved. Never publish because a review just finished, never publish a cycle that failed verification, and never publish a `-SAMPLE` fixture. The same `.claude/skills/` mirroring rule applies.
+
 ## Environment & data sources
 
 > Fill in the specifics below; Claude should ask rather than assume when a value is still `TBD`.
@@ -40,7 +42,8 @@ A copy also sits at `.claude/skills/entra-pim-monthly-review/` for Claude Code, 
 
   Delegated and application grants of the same three permission names (`AuditLog.Read.All`, `Directory.Read.All`, `RoleManagement.Read.Directory`) are **not interchangeable** — register and consent both sets. Run `scripts/check_auth.py` in each mode before relying on it; no secret is ever written to disk.
 - **Audit log retention is the binding constraint.** Entra keeps directory audit logs for a short window — commonly 7 days on Free, 30 days on P1/P2 (confirm for this tenant). Run the export within the first few business days of the following month or the period is gone permanently.
-- **Connectors:** Atlassian (Jira/Confluence) and other MCP servers require OAuth authorization before use. If a connector is unauthorized, say so rather than working around it.
+- **SharePoint publication target (Phase C):** TBD — set `sharepoint` in `scripts/config.json`. Needs three things before `enabled` can be set true: the document library exists; the app holds `Sites.Selected` with an admin grant of `write` on that one site (never tenant-wide `Sites.ReadWrite.All`); and a retention label is applied to the library so published evidence is immutable. Auditors get read-only access. Design and open decisions: `docs/entra-pim-sharepoint-publication-design.docx`.
+- **Connectors:** Atlassian (Jira/Confluence) and other MCP servers require OAuth authorization before use. If a connector is unauthorized, say so rather than working around it. The Microsoft 365 connector is **read-only** — `sharepoint_search` and `sharepoint_folder_search` can confirm a published file landed, but cannot upload. Publication goes through `scripts/publish_month.py`.
 
 ## Monthly review process
 
@@ -70,6 +73,7 @@ python scripts/check_auth.py                                 # prove access firs
 python scripts/run_month.py --month 2026-08 --export-only    # PHASE A: steps 1-2
 python scripts/run_month.py --month 2026-08 --skip-export    # PHASE B: steps 3-4
 python scripts/verify_cycle.py --month 2026-08               # verification pass
+python scripts/publish_month.py --month 2026-08 --dry-run    # PHASE C: step 5, after approval
 ```
 
 Phase A needs Graph credentials and runs as Vineet interactively, or unattended via
@@ -78,6 +82,11 @@ Phase B needs only the files in `input/` and is driven by the `entra-pim-monthly
 skill in `skills/` — that is where triage, month-over-month comparison, and the approval
 gate live. Claude should never perform the export as part of Phase B; if inputs are missing,
 report the gap and offer the Phase A command.
+
+Phase C (publication) is separate again, driven by the `entra-pim-publish-sharepoint` skill.
+It re-runs `verify_cycle.py` rather than trusting an earlier pass, refuses `-SAMPLE` labels,
+refuses to overwrite, and records an approver in `publication-receipt-<label>.json`. Claude
+should never publish as part of Phase B — approving findings is not approving publication.
 
 The correlation answers: **what did each admin actually do with the privilege they activated?** Successful activations anchor a window of `activation_window_hours` (default 8); directory audit events by the same actor inside that window are attributed to it. PIM's own events are excluded so an activation never correlates with itself.
 
@@ -98,6 +107,7 @@ All deliverables go in `<Month>/output/`.
 - **Executive summary** — `.docx`, named `entra-pim-review-summary-YYYY-MM.docx`. One page: scope, counts (distinct events, activations, exceptions raised, revoked, retained), notable risks, remediation status, limitations.
 - **Machine-readable CSVs** — `activations-YYYY-MM.csv`, `correlated-actions-YYYY-MM.csv`, `uncovered-actions-YYYY-MM.csv`, `exceptions-YYYY-MM.csv`, plus `correlation-stats-YYYY-MM.json` which carries every count used in the reports.
 - **Evidence** — raw source exports stay unmodified in `input/`; the workbook's `Evidence` sheet reproduces `export-manifest.json` so every figure cites a file name, row count, sha256, and export date.
+- **Publication receipt** — `publication-receipt-YYYY-MM.json`, written by Phase C only. Records destination URL, each published file's sha256 and item ID, the named approver, and the timestamp. Its presence means the cycle has been published; do not publish again.
 - Dates as `YYYY-MM-DD`. Period labels as `YYYY-MM`. Month folders use the month name (`August`, `August-2`).
 - A test or fixture run uses a `-SAMPLE` suffix in place of the period label so it can never be mistaken for a real cycle.
 

@@ -12,6 +12,10 @@ Owner: Vineet Gupta (vgupta@caqh.org), CAQH.
 
 **Always present a written plan and wait for Approval before beginning a multistep task**
 
+**Running the monthly review.** When Vineet asks to run the monthly PIM review, process a month's PIM export, review privileged access for a period, or asks what admins did with the privilege they activated — read `skills/entra-pim-monthly-review/SKILL.md` and follow it exactly, start to finish. That file is the authoritative procedure for Phase B: preconditions, run order, the verification gate, triage, month-over-month comparison, and the approval gate before anything is finalised. Do not improvise the steps from this file alone, and do not skip the approval gate.
+
+A copy also sits at `.claude/skills/entra-pim-monthly-review/` for Claude Code, where project skills load automatically and `/entra-pim-monthly-review` works. Cowork does not load skills from the project folder, so in Cowork this instruction is what wires the procedure in. Both copies must stay in sync — `skills/` is canonical; re-copy after editing it.
+
 ## Environment & data sources
 
 > Fill in the specifics below; Claude should ask rather than assume when a value is still `TBD`.

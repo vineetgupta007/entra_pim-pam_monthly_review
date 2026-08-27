@@ -29,6 +29,8 @@ COLUMNS = ["@timestamp", "Source User", "Source User Action", "Destination User"
            "Entra Role", "User Action", "Justification", "#event.outcome"]
 
 # Activity display names that are PIM role activations or eligibility grants.
+# Keep in step with KNOWN_ACTIONS in correlate.py: a name listed here but unhandled there
+# would stop being reported as unmapped while still generating no findings.
 KNOWN_ACTIVITIES = {
     "add-member-to-role-requested-(pim-activation)",
     "add-member-to-role-completed-(pim-activation)",
@@ -37,6 +39,12 @@ KNOWN_ACTIVITIES = {
     "add-eligible-member-to-role-in-pim-completed-(timebound)",
     "remove-member-from-role-requested-(pim-activation)",
     "remove-member-from-role-completed-(pim-activation)",
+    # Permanent variants - no expiry, so each is an exception rather than routine.
+    "add-eligible-member-to-role-in-pim-requested-(permanent)",
+    "add-eligible-member-to-role-in-pim-completed-(permanent)",
+    "add-member-to-role-outside-of-pim-(permanent)",
+    # Routine expiry of an activation.
+    "remove-member-from-role-(pim-activation-expired)",
 }
 
 

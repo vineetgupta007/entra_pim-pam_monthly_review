@@ -133,10 +133,16 @@ fill in the Decisions sheet before the owner has responded.
 Only what was approved:
 
 - Record agreed dispositions on the workbook's `Decisions` sheet — decision, decider, date.
-- Draft per-owner attestation requests if asked, into files in `<Month>/output/`. Do not send
+  A bare "approved" approves the *findings*, not the dispositions: without a named decider
+  and a per-theme decision, leave those three columns blank and ask. Do not infer a decision
+  from the advisory recommendation.
+- Draft per-owner attestation requests if asked, with `python scripts/draft_attestations.py
+  --month YYYY-MM`, which writes one file per actor into `<Month>/output/`. Do not send
   anything.
 - Note carried-forward items for next cycle.
-- Re-run `verify_cycle.py` if the workbook changed.
+- Re-run `verify_cycle.py` if the workbook changed, and report the result — a rebuild that
+  leaves every approved count identical is the evidence that post-approval edits were
+  presentational.
 
 Anything that leaves the folder — email, Jira, Confluence — is a separate approval. Revocation
 is never automated.

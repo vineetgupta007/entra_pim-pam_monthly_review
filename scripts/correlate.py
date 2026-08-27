@@ -7,6 +7,11 @@ Method
      'adminab@contoso.com'; a case-sensitive join silently drops matches). All time in UTC.
   2. Drop exact duplicate rows, recording how many. 'requested' and 'completed' events are
      NOT duplicates of each other and are kept distinct.
+  2b. Reassemble Graph's chunked audit events. An event whose additionalDetails payload is
+     too large for one row is emitted as several rows sharing an 'id' with 'seq' 1..N.
+     They are fragments of ONE event; exact-duplicate dropping cannot see them because the
+     payload slice and the sub-second Date differ, so left alone they inflate every action
+     count downstream.
   3. Anchors = successful 'add-member-to-role-completed-(pim-activation)' events.
      Eligibility grants are a different thing and are not used as anchors.
   4. Window = [activation, activation + activation_window_hours).
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -45,11 +51,35 @@ ELIGIBILITY_COMPLETED = "add-eligible-member-to-role-in-pim-completed-(timebound
 ELIGIBILITY_REQUESTED = "add-eligible-member-to-role-in-pim-requested-(timebound)"
 TIMEBOUND_REQUESTED = "add-member-to-role-in-pim-requested-(timebound)"
 DEACTIVATION = "remove-member-from-role-completed-(pim-activation)"
+DEACTIVATION_REQUESTED = "remove-member-from-role-requested-(pim-activation)"
+
+# Permanent variants. PIM's whole purpose is time-bound privilege, so an assignment or
+# eligibility granted with no expiry is a finding rather than routine bookkeeping.
+ELIGIBILITY_COMPLETED_PERMANENT = "add-eligible-member-to-role-in-pim-completed-(permanent)"
+ELIGIBILITY_REQUESTED_PERMANENT = "add-eligible-member-to-role-in-pim-requested-(permanent)"
+ASSIGNMENT_OUTSIDE_PIM_PERMANENT = "add-member-to-role-outside-of-pim-(permanent)"
+
+# Routine expiry of an activation. Benign, but must be named so it does not read as an
+# unrecognised event type.
+ACTIVATION_EXPIRED = "remove-member-from-role-(pim-activation-expired)"
+
+# Every action name the analysis understands. Anything outside this set is reported as
+# unmapped, because an event type nobody has mapped generates no exceptions and would
+# otherwise be silently absent from the findings.
+KNOWN_ACTIONS = {
+    ACTIVATION_COMPLETED, ACTIVATION_REQUESTED,
+    ELIGIBILITY_COMPLETED, ELIGIBILITY_REQUESTED,
+    ELIGIBILITY_COMPLETED_PERMANENT, ELIGIBILITY_REQUESTED_PERMANENT,
+    ASSIGNMENT_OUTSIDE_PIM_PERMANENT, TIMEBOUND_REQUESTED,
+    DEACTIVATION, DEACTIVATION_REQUESTED, ACTIVATION_EXPIRED,
+}
 
 SEVERITY = {
     "uncovered_privileged_action": "High",
     "failed_activation": "High",
     "failed_timebound_assignment_request": "High",
+    "permanent_assignment_outside_pim": "High",
+    "permanent_eligibility_grant": "High",
     "activation_on_behalf_of_other": "Medium",
     "activation_request_not_completed": "Medium",
     "activation_no_actions": "Medium",
@@ -91,12 +121,97 @@ def load_pim(path: Path) -> tuple[pd.DataFrame, dict]:
     return df, stats
 
 
+# Graph splits an audit event whose additionalDetails payload will not fit in one row
+# across several rows. Each fragment carries the same {"key":"id"} plus an incrementing
+# {"key":"seq"}, with its slice of the payload under {"key":"b"}.
+_AD_ID_RE = re.compile(r'\{"key":"id","value":"([^"]*)"\}')
+_AD_SEQ_RE = re.compile(r'\{"key":"seq","value":"(\d+)"\}')
+_AD_B_RE = re.compile(r'\{"key":"b","value":"(.*)"\}', re.DOTALL)
+
+
+def _ad_field(text: str, pattern: re.Pattern) -> str:
+    m = pattern.search(text or "")
+    return m.group(1) if m else ""
+
+
+def reassemble_chunked_events(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Collapse Graph's multi-row additionalDetails fragments into one row per event.
+
+    A fragmented event appears as N rows sharing an additionalDetails 'id' with 'seq'
+    1..N, otherwise identical apart from the payload slice and a sub-second difference in
+    Date. Exact-duplicate dropping cannot collapse them for exactly that reason, so
+    without this they survive into correlated-actions as apparent repeats of one action
+    and inflate every action count that follows.
+
+    Grouping is on id + actor + activity + correlationId rather than id alone, so an id
+    reused across genuinely different events can never merge two of them. The payload is
+    rebuilt in seq order rather than discarded, and the event is anchored at the earliest
+    timestamp in its group.
+    """
+    stats = {"audit_chunk_fragment_rows": 0, "audit_chunked_events": 0,
+             "audit_chunk_rows_collapsed": 0}
+    if df.empty or "AdditionalDetails" not in df.columns:
+        return df, stats
+
+    ad = df["AdditionalDetails"].fillna("").astype(str)
+    frag_id = ad.map(lambda s: _ad_field(s, _AD_ID_RE))
+    frag_seq = ad.map(lambda s: _ad_field(s, _AD_SEQ_RE))
+    # A row needs both an id and a seq to be a fragment; an id alone is just an event id.
+    is_frag = (frag_id != "") & (frag_seq != "")
+    if not is_frag.any():
+        return df, stats
+
+    def col(name: str) -> pd.Series:
+        return (df[name].fillna("").astype(str) if name in df.columns
+                else pd.Series([""] * len(df), index=df.index))
+
+    work = df.copy()
+    work["_frag_id"] = frag_id
+    work["_frag_seq"] = pd.to_numeric(frag_seq, errors="coerce")
+    work["_grp"] = list(zip(frag_id, col("Actor").str.casefold(),
+                            col("Activity"), col("CorrelationId")))
+
+    keep, fragment_rows, chunked, collapsed = [], 0, 0, 0
+    for _, g in work[is_frag].groupby("_grp", sort=False):
+        fragment_rows += len(g)
+        if len(g) == 1:
+            keep.append(g.index[0])
+            continue
+        chunked += 1
+        collapsed += len(g) - 1
+        g = g.sort_values("_frag_seq")
+        rep = g.index[0]
+        payload = "".join(_ad_field(s, _AD_B_RE)
+                          for s in g["AdditionalDetails"].fillna("").astype(str))
+        if payload:
+            work.at[rep, "AdditionalDetails"] = json.dumps([
+                {"key": "id", "value": g["_frag_id"].iloc[0]},
+                {"key": "reassembled_from_fragments", "value": str(len(g))},
+                {"key": "b", "value": payload},
+            ])
+        if "ts" in work.columns:
+            work.at[rep, "ts"] = g["ts"].min()
+        keep.append(rep)
+
+    out = pd.concat([work[~is_frag], work.loc[pd.Index(keep)]])
+    out = out.drop(columns=["_frag_id", "_frag_seq", "_grp"])
+    if "ts" in out.columns:
+        out = out.sort_values("ts")
+    out = out.reset_index(drop=True)
+
+    stats.update({"audit_chunk_fragment_rows": fragment_rows,
+                  "audit_chunked_events": chunked,
+                  "audit_chunk_rows_collapsed": collapsed})
+    return out, stats
+
+
 def load_audit(path: Path | None) -> tuple[pd.DataFrame | None, dict]:
     if path is None or not path.exists():
         return None, {"audit_file": None, "audit_available": False, "audit_rows_raw": 0}
 
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
     stats = {"audit_file": path.name, "audit_available": True, "audit_rows_raw": len(df)}
+    source_columns = list(df.columns)
 
     before = len(df)
     df = df.drop_duplicates().reset_index(drop=True)
@@ -105,6 +220,29 @@ def load_audit(path: Path | None) -> tuple[pd.DataFrame | None, dict]:
     df["ts"] = pd.to_datetime(df["Date"], errors="coerce", utc=True, format="mixed")
     stats["audit_rows_unparseable_timestamp"] = int(df["ts"].isna().sum())
     df = df[df["ts"].notna()].reset_index(drop=True)
+
+    # One logical event split across rows is not several events. Must run before the
+    # correlation join, or each fragment is counted as a separate action taken.
+    df, chunk_stats = reassemble_chunked_events(df)
+    stats.update(chunk_stats)
+    stats["audit_rows_after_reassembly"] = len(df)
+
+    # Rows that no exported field can tell apart - identical in every column but the
+    # sub-second timestamp. Counted and reported, NOT dropped: the field that would
+    # distinguish them (modifiedProperties, e.g. which app role was granted) is absent
+    # from this export's column set, so whether they are repeated events or one event
+    # emitted several times cannot be decided from this file. Dropping them could erase
+    # real privileged actions; keeping them may overstate volume. The gap is reported.
+    content_cols = [c for c in source_columns if c != "Date" and c in df.columns]
+    stats["audit_content_identical_rows"] = (
+        int(df.duplicated(subset=content_cols).sum()) if content_cols else 0)
+
+    # Graph's per-event id, where the export carries one. Lets a deliverable row be traced
+    # to a unique source event, and lets verification prove reassembly actually happened.
+    df["event_id"] = (df["AdditionalDetails"].fillna("").astype(str)
+                      .map(lambda s: _ad_field(s, _AD_ID_RE))
+                      if "AdditionalDetails" in df.columns
+                      else pd.Series([""] * len(df), index=df.index))
 
     df["actor"] = df["Actor"].map(norm_upn)
     # Safe attribute names: itertuples renames columns like 'Target(s)' positionally.
@@ -141,7 +279,7 @@ def correlate(activations: pd.DataFrame, audit: pd.DataFrame | None) -> pd.DataF
             "activation_id", "actor", "Entra Role", "activation_utc", "window_end_utc",
             "minutes_after_activation", "audit_Date", "audit_Activity", "audit_Category",
             "audit_Service", "audit_Result", "audit_Target(s)", "audit_CorrelationId",
-            "ambiguous_attribution"])
+            "audit_event_id", "ambiguous_attribution"])
 
     by_actor = {a: g for a, g in audit.groupby("actor")}
     out = []
@@ -166,6 +304,7 @@ def correlate(activations: pd.DataFrame, audit: pd.DataFrame | None) -> pd.DataF
                 "audit_Result": ev.result,
                 "audit_Target(s)": ev.target_s,
                 "audit_CorrelationId": ev.correlation_id,
+                "audit_event_id": ev.event_id,
                 "_event_key": f"{ev.actor}|{ev.date_raw}|{ev.correlation_id}|{ev.activity}",
             })
     df = pd.DataFrame(out)
@@ -203,6 +342,7 @@ def find_uncovered(audit: pd.DataFrame | None, activations: pd.DataFrame,
             "audit_Result": ev.result,
             "audit_Target(s)": ev.target_s,
             "audit_CorrelationId": ev.correlation_id,
+            "audit_event_id": ev.event_id,
             "is_break_glass": ev.actor in break_glass,
         })
     return pd.DataFrame(rows)
@@ -303,6 +443,25 @@ def build_exceptions(pim, activations, correlated, uncovered, cfg, audit_availab
         add("eligibility_grant_for_review", r.actor, r.role, r.ts.isoformat(),
             f"Eligibility granted to {r.dest or 'unknown'} - confirm approved and time-bound", "")
 
+    # Permanent eligibility - eligibility with no expiry, which defeats time-binding.
+    # Reported at both request and completion stage, matching the timebound treatment
+    # above, so the owner can see whether a request was actually granted.
+    elig_perm = pim[pim["action"].isin([ELIGIBILITY_COMPLETED_PERMANENT,
+                                        ELIGIBILITY_REQUESTED_PERMANENT])]
+    for r in elig_perm.itertuples(index=False):
+        stage = "completed" if r.action == ELIGIBILITY_COMPLETED_PERMANENT else "requested"
+        add("permanent_eligibility_grant", r.actor, r.role, r.ts.isoformat(),
+            f"PERMANENT (no expiry) eligibility {stage} for {r.dest or 'unknown'} - PIM "
+            f"eligibility should be time-bound; confirm approved or convert to time-bound", "")
+
+    # Role membership granted permanently and outside PIM altogether - standing access
+    # subject to no activation, approval or expiry. Exactly what this review exists to find.
+    outside = pim[pim["action"] == ASSIGNMENT_OUTSIDE_PIM_PERMANENT]
+    for r in outside.itertuples(index=False):
+        add("permanent_assignment_outside_pim", r.actor, r.role, r.ts.isoformat(),
+            f"Permanent role assignment made OUTSIDE PIM for {r.dest or 'unknown'} - "
+            f"standing privileged access, not subject to activation, approval or expiry", "")
+
     if uncovered is not None and not uncovered.empty:
         for r in uncovered[~uncovered["is_break_glass"]].itertuples(index=False):
             add("uncovered_privileged_action", r.actor, "", r.audit_Date,
@@ -354,6 +513,15 @@ def main() -> int:
              "activation_window_hours": window_hours,
              "reporting_timezone": cfg.get("reporting_timezone", "UTC"),
              "config_source": cfg["_config_source"]}
+
+    # Guard on the analysis side, not just in the exporter's manifest note: a PIM event
+    # type nobody has mapped produces no exceptions, so it would otherwise be absent from
+    # the findings without anything saying so. Files placed by hand never pass through the
+    # exporter at all, so this is the only check that sees them.
+    unmapped = (pim.loc[~pim["action"].isin(KNOWN_ACTIONS), "action"]
+                .value_counts().to_dict())
+    stats["pim_unmapped_actions"] = unmapped
+    stats["pim_unmapped_action_rows"] = int(sum(unmapped.values()))
 
     activations = build_activations(pim, window_hours)
     stats["activations_successful"] = len(activations)
@@ -430,6 +598,12 @@ def main() -> int:
           f"({stats['pim_exact_duplicates_dropped']} exact duplicates dropped)")
     print(f"  successful activations (anchors): {stats['activations_successful']}")
     if astats.get("audit_available"):
+        if stats.get("audit_chunk_rows_collapsed"):
+            print(f"  audit rows: {stats['audit_rows_raw']} raw -> "
+                  f"{stats['audit_rows_after_reassembly']} after reassembling "
+                  f"{stats['audit_chunk_fragment_rows']} chunk fragment rows into "
+                  f"{stats['audit_chunked_events']} events "
+                  f"({stats['audit_chunk_rows_collapsed']} rows collapsed)")
         print(f"  audit rows eligible: {stats.get('audit_rows_eligible_for_correlation')}")
         print(f"  correlated action rows: {stats['correlated_action_rows']} "
               f"({stats['correlated_ambiguous_rows']} ambiguous)")
@@ -438,6 +612,11 @@ def main() -> int:
         print("  NO AUDIT FILE - activations reported as 'unknown - no audit data'; "
               "no 'unused activation' findings can be made without it")
     print(f"  exceptions: {stats['exception_rows']}")
+    if unmapped:
+        print(f"  WARNING: {stats['pim_unmapped_action_rows']} row(s) carry a PIM action "
+              f"this script does not map, so they generate no findings:")
+        for name, n in sorted(unmapped.items(), key=lambda kv: -kv[1]):
+            print(f"    {name} = {n}")
     print(f"  wrote 5 files to {outdir}")
     return 0
 

@@ -1,8 +1,11 @@
 """Verification pass - run at the end of every cycle before the deliverables are shared.
 
 Checks (CLAUDE.md verification rule):
-  1. Row counts reconcile: raw source -> deduped -> anchors -> workbook sheets.
-  2. No duplicate rows in any output sheet.
+  1. Row counts reconcile: raw source -> deduped -> anchors -> workbook sheets, and every
+     audit row dropped along the way is attributable to a named cause.
+  2. No duplicate rows in any output sheet, plus proof that Graph's chunked-event
+     fragments were reassembled - they differ in the microseconds of Date, so an
+     exact-match test alone never sees them.
   3. Exception totals and severity counts agree between correlation-stats and the CSVs.
   4. Every input file appears in export-manifest.json.
   5. No orphan references: every activation_id used in correlated/exception rows exists.
@@ -169,6 +172,29 @@ def main() -> int:
           f"activations csv {len(acts)} vs stats {stats.get('activations_successful')}")
     check(len(acts) <= dedup, "Anchors do not exceed distinct events", f"{len(acts)} <= {dedup}")
 
+    # 1b - audit row reconciliation. Every row leaving the raw file must be accounted for
+    # by exactly one of: exact duplicate, unparseable timestamp, chunk fragment collapsed
+    # into its parent event, or PIM's own bookkeeping excluded from the action set.
+    if stats.get("audit_available"):
+        a_after = int(stats.get("audit_rows_after_reassembly", -1))
+        if a_after >= 0:
+            a_raw = int(stats.get("audit_rows_raw", 0))
+            a_dup = int(stats.get("audit_exact_duplicates_dropped", 0))
+            a_bad = int(stats.get("audit_rows_unparseable_timestamp", 0))
+            a_col = int(stats.get("audit_chunk_rows_collapsed", 0))
+            check(a_raw - a_dup - a_bad - a_col == a_after,
+                  "Audit row counts reconcile",
+                  f"{a_raw} raw - {a_dup} dup - {a_bad} bad ts - {a_col} chunk "
+                  f"fragments = {a_after}")
+            a_pim = int(stats.get("audit_pim_service_rows_excluded", 0))
+            a_elig = int(stats.get("audit_rows_eligible_for_correlation", -1))
+            check(a_after - a_pim == a_elig, "Audit eligible count reconciles",
+                  f"{a_after} - {a_pim} PIM-service = {a_elig}")
+        else:
+            check(False, "Audit row counts reconcile",
+                  "correlation-stats has no audit_rows_after_reassembly - stats predate "
+                  "chunked-event reassembly; re-run correlate.py")
+
     # 2 - duplicates in outputs
     for name, df in (("activations", acts), ("exceptions", exc),
                      ("correlated-actions", corr), ("uncovered-actions", unc)):
@@ -176,6 +202,28 @@ def main() -> int:
             continue
         dupes = int(df.duplicated().sum())
         check(dupes == 0, f"No duplicate rows in {name}", f"{dupes} found")
+
+    # 2b - proof that chunked events were reassembled. A Graph event split across rows
+    # gives every fragment the same audit_event_id, and exact-duplicate detection cannot
+    # see them because the payload slice and the sub-second Date differ. After reassembly
+    # each event is one row, so an id may appear at most once per activation window
+    # (across windows is legitimate - that is ambiguous attribution).
+    #
+    # This replaces an earlier whole-second comparison, which flagged rows that no
+    # exported field can distinguish. Those are counted separately and reported rather
+    # than failed, because this export omits the field that would tell them apart.
+    if not corr.empty and "audit_event_id" in corr.columns:
+        withid = corr[corr["audit_event_id"].astype(str).str.strip() != ""]
+        n = int(withid.duplicated(subset=["activation_id", "audit_event_id"]).sum())
+        check(n == 0, "Chunked audit events reassembled (correlated-actions)",
+              f"{n} repeated event id(s) within one activation"
+              + ("" if n == 0 else " - fragments were not reassembled"))
+    if not unc.empty and "audit_event_id" in unc.columns:
+        withid = unc[unc["audit_event_id"].astype(str).str.strip() != ""]
+        n = int(withid.duplicated(subset=["audit_event_id"]).sum())
+        check(n == 0, "Chunked audit events reassembled (uncovered-actions)",
+              f"{n} repeated event id(s)")
+
     if not acts.empty:
         d = int(acts["activation_id"].duplicated().sum())
         check(d == 0, "activation_id is unique", f"{d} duplicates")
@@ -341,6 +389,24 @@ def main() -> int:
     if not stats.get("audit_available"):
         print("\n  NOTE: no directory audit export was present, so the correlation checks "
               "that depend on it were not exercised.")
+
+    # Not a failure - these may be real repeated actions - but the ambiguity has to be
+    # visible, because it bounds how precisely any action count can be read.
+    ci = int(stats.get("audit_content_identical_rows", 0) or 0)
+    if ci:
+        print(f"\n  NOTE: {ci} audit row(s) are identical to another row in every exported "
+              f"field except the sub-second timestamp. They are kept, not deduplicated: "
+              f"the field that would distinguish them (modifiedProperties) is not in this "
+              f"export, so action volume for those events is an upper bound.")
+
+    # Not a failure - a new Graph event type should not block a cycle - but it must be
+    # visible in the gate output, because unmapped rows generate no findings at all.
+    unmapped = stats.get("pim_unmapped_actions") or {}
+    if unmapped:
+        print(f"\n  NOTE: {stats.get('pim_unmapped_action_rows', 0)} PIM row(s) carry an "
+              f"action correlate.py does not map and so produce no findings:")
+        for name, n in sorted(unmapped.items(), key=lambda kv: -kv[1]):
+            print(f"          {name} = {n}")
     return 1 if failures else 0
 
 

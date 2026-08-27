@@ -45,6 +45,94 @@ THIN = Side(style="thin", color="BFBFBF")
 
 ROW_BUFFER = 100  # formula ranges extend this far past the data so edits still recalculate
 
+# --------------------------------------------------------------- advisory triage columns
+#
+# These three Decisions columns group the exception list so a role owner is not handed
+# hundreds of undifferentiated rows. They are ADVISORY and carry no authority: they set no
+# severity, change no count, and leave decision / decided_by / decision_date untouched.
+# Per CLAUDE.md the keep / modify / revoke decision belongs to the role owner.
+
+REVIEW_THEME = {
+    "permanent_assignment_outside_pim": "Standing access outside time-binding",
+    "permanent_eligibility_grant": "Standing access outside time-binding",
+    "uncovered_privileged_action": "Action outside any activation window",
+    "global_administrator_activation": "Highest-privilege role usage",
+    "failed_timebound_assignment_request": "Failing control - configuration",
+    "failed_activation": "Failing control - configuration",
+    "weak_justification": "Justification quality",
+    "missing_justification": "Justification quality",
+    "activation_no_actions": "Activation with no observed use",
+    "activation_request_not_completed": "Activation with no observed use",
+    "activation_on_behalf_of_other": "Delegation path",
+    "eligibility_grant_for_review": "Eligibility granted",
+    "off_hours_activation": "Timing - check reporting_timezone first",
+    "break_glass_activity": "Break-glass - reported, not for revocation",
+}
+
+ADVISORY = {
+    "permanent_assignment_outside_pim":
+        "Confirm this was approved. If it stands, convert to a PIM-managed, time-bound "
+        "assignment; a permanent grant made outside PIM is subject to no activation, "
+        "approval or expiry.",
+    "permanent_eligibility_grant":
+        "Confirm approved, then convert to time-bound eligibility. Permanent eligibility "
+        "defeats the purpose of PIM.",
+    "uncovered_privileged_action":
+        "Establish how the actor held this privilege with no activation covering it - "
+        "standing assignment, PIM bypass, or attribution falling outside the fixed window.",
+    "global_administrator_activation":
+        "Confirm Global Administrator was necessary and no narrower role would serve.",
+    "failed_timebound_assignment_request":
+        "Diagnose the block rather than attest: every such request failed this period, "
+        "which indicates configuration or policy, not user error.",
+    "failed_activation":
+        "Diagnose the cause; repeated failures may indicate misconfiguration.",
+    "weak_justification":
+        "Assess before actioning - a bare ticket reference may be adequate evidence while "
+        "still failing the character-count rule. Consider tuning the rule.",
+    "missing_justification":
+        "Require a justification for future activations of this role.",
+    "activation_no_actions":
+        "Candidate for removal, but read alongside the fixed attribution window: an admin "
+        "who worked outside that window looks identical to one who did nothing.",
+    "activation_on_behalf_of_other":
+        "Confirm this is an approved delegation path.",
+    "eligibility_grant_for_review":
+        "Confirm the grant was approved and is time-bound.",
+    "off_hours_activation":
+        "Confirm reporting_timezone matches the operating timezone before treating this as "
+        "a finding; a UTC default inflates off-hours counts for a non-UTC organisation.",
+    "break_glass_activity":
+        "Reported for visibility only. Not for revocation.",
+}
+
+READ_ONLY_RIDER = (" NOTE: this is a read/telemetry operation, which is weak evidence of "
+                   "standing privileged access - triage below the write operations in this "
+                   "class.")
+
+# Audit activities that read state rather than change it. Anything not listed is treated as
+# a write or unclear, so an unrecognised activity is never wrongly discounted.
+READ_ONLY_ACTIVITIES = {
+    "groupsodatav4_get", "validate user authentication",
+    "group_getdynamicgroupproperties", "settings_getsettingsasync",
+    "approval_getall", "get authenticationeventlisteners",
+}
+
+
+def classify_action(exception_class: str, detail: str) -> str:
+    """read-only / write-or-unclear for an uncovered action; blank for other classes.
+
+    Informational only - it does not alter severity, so approved counts stay valid.
+    """
+    if exception_class != "uncovered_privileged_action":
+        return ""
+    start = str(detail).find("'")
+    end = str(detail).find("'", start + 1)
+    if start < 0 or end < 0:
+        return "write or unclear"
+    activity = str(detail)[start + 1:end].strip().casefold()
+    return "read-only" if activity in READ_ONLY_ACTIVITIES else "write or unclear"
+
 
 def last_row(df: pd.DataFrame) -> int:
     """Formula range end: data extent plus a small buffer. Deliberately not a 100k-row
@@ -219,6 +307,23 @@ def build_summary(ws, stats: dict, acts: pd.DataFrame, exc: pd.DataFrame,
     if not stats.get("break_glass_declared"):
         notes.append("No break-glass accounts are declared in config, so any such account will "
                      "appear as an uncovered-action finding.")
+    if stats.get("audit_chunk_rows_collapsed"):
+        notes.append(
+            f"{stats['audit_chunk_fragment_rows']} audit rows were fragments of "
+            f"{stats['audit_chunked_events']} events split by Graph across rows, and were "
+            f"reassembled; counting them separately would have inflated action volume by "
+            f"{stats['audit_chunk_rows_collapsed']} rows.")
+    if stats.get("audit_content_identical_rows"):
+        notes.append(
+            f"{stats['audit_content_identical_rows']} audit rows are indistinguishable from "
+            f"another row in every exported field except the sub-second timestamp. They are "
+            f"kept rather than deduplicated, so action volume is an upper bound for those "
+            f"events.")
+    if stats.get("pim_unmapped_action_rows"):
+        notes.append(
+            f"{stats['pim_unmapped_action_rows']} PIM rows carry an event type this workflow "
+            f"does not map and therefore generate no findings: "
+            f"{', '.join(f'{k} ({v})' for k, v in sorted((stats.get('pim_unmapped_actions') or {}).items()))}.")
     for n in notes:
         ws[f"A{row}"] = f"- {n}"
         ws[f"A{row}"].font = NOTE_FONT
@@ -353,6 +458,12 @@ def build_docx(path: Path, stats: dict, acts: pd.DataFrame, exc: pd.DataFrame,
            "activated role authorised it.",
            "Every figure traces to a source file listed on the workbook's Evidence sheet. "
            "Recommendations are advisory; revocation decisions belong to the role owner."]
+    if stats.get("audit_content_identical_rows"):
+        lim.append(
+            f"{stats['audit_content_identical_rows']} audit rows cannot be distinguished from "
+            f"another row by any exported field except a sub-second timestamp difference. They "
+            f"are retained rather than deduplicated, because the field that would separate them "
+            f"is absent from the export; action volume for those events is an upper bound.")
     if not audit_ok:
         lim.insert(0, "No directory audit data was available for this period, so no activation "
                       "is reported as unused. Absence of evidence is not evidence of absence.")
@@ -403,15 +514,27 @@ def main() -> int:
                 if not stats.get("audit_available") else "")
     write_sheet(wb, "Exceptions", exc)
     decisions = pd.DataFrame(columns=["exception_id", "exception_class", "actor", "entra_role",
+                                      "review_theme", "action_type",
+                                      "advisory_recommendation",
                                       "decision (keep/modify/revoke)", "decided_by",
                                       "decision_date", "target_remediation_date", "notes"])
     if not exc.empty:
         decisions = exc[["exception_id", "exception_class", "actor", "entra_role"]].copy()
+        decisions["review_theme"] = exc["exception_class"].map(
+            lambda c: REVIEW_THEME.get(c, "Unthemed - triage manually"))
+        decisions["action_type"] = [classify_action(cls, det) for cls, det
+                                    in zip(exc["exception_class"], exc["detail"])]
+        decisions["advisory_recommendation"] = [
+            ADVISORY.get(cls, "Route to role owner for keep / modify / revoke.")
+            + (READ_ONLY_RIDER if at == "read-only" else "")
+            for cls, at in zip(exc["exception_class"], decisions["action_type"])]
         for c in ("decision (keep/modify/revoke)", "decided_by", "decision_date",
                   "target_remediation_date", "notes"):
             decisions[c] = ""
     write_sheet(wb, "Decisions", decisions,
-                "Role owner fills the blank columns: decision, decider, date.")
+                "review_theme, action_type and advisory_recommendation are advisory only "
+                "and set no severity. Role owner fills the blank columns: decision, "
+                "decider, date.")
     build_evidence(wb.create_sheet("Evidence"), stats)
 
     xlsx = out / f"entra-pim-correlation-{label}.xlsx"

@@ -94,6 +94,7 @@ Rules the scripts enforce, which apply to any manual analysis too:
 
 - **Casefold every UPN before joining.** The source data mixes `AdminAB@CONTOSO.COM` and `adminab@contoso.com`; a case-sensitive join silently drops matches.
 - **Deduplicate, and report how many were dropped.** The log platform emits each event 2–8 times. `requested` and `completed` events are *not* duplicates of each other.
+- **One event split across rows is not several events.** Graph fragments an audit event whose `additionalDetails` payload will not fit in one row, giving each fragment the same `id` and an incrementing `seq`. Exact-duplicate dropping cannot see them, so they must be reassembled before any count is taken or every action total is inflated. Conversely, rows that differ *only* in a sub-second timestamp are **kept, not dropped** — the field that would distinguish them is absent from the export, and erasing a real privileged action is the worse error. Report the count and read those volumes as an upper bound.
 - **With no audit file, activations read `unknown - no audit data`, never `no actions taken`.** Absence of evidence is not evidence of absence.
 - **Correlation is temporal, not causal.** An action inside a window is not proof the activated role authorised it.
 - Self-activation is normal PIM behaviour and is a summary statistic, not an exception. The reviewable anomaly is activating *for another account*.

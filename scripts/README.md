@@ -154,6 +154,15 @@ python build_reports.py --month 2026-08
    `adminab@contoso.com`, and a case-sensitive join silently drops matches. All time in UTC.
 2. Exact duplicate rows are dropped and counted. `requested` and `completed` events are not
    duplicates of each other and stay distinct.
+2b. Graph splits an audit event whose `additionalDetails` payload will not fit in one row
+   across several rows, each carrying the same `id` with an incrementing `seq`. These are
+   fragments of **one** event, and exact-duplicate dropping cannot see them because the
+   payload slice and the sub-second timestamp differ — so left alone they inflate every
+   action count downstream. They are grouped on `id` + actor + activity + correlationId
+   (never `id` alone, so a reused id cannot merge two real events), the payload is rebuilt
+   in `seq` order rather than discarded, and the event is anchored at the earliest
+   timestamp in its group. `audit_event_id` is carried into the output CSVs so an auditor
+   can trace a row to a unique source event, and so verification can prove reassembly ran.
 3. Anchors are successful `add-member-to-role-completed-(pim-activation)` events. Eligibility
    grants are a different thing and are never used as anchors.
 4. Window = `[activation, activation + activation_window_hours)`, default 8h.
@@ -173,6 +182,8 @@ inferred that the source files do not show.
 | `uncovered_privileged_action` | High | Action outside every activation window — possible standing access or PIM bypass |
 | `failed_activation` | High | Activation attempt failed |
 | `failed_timebound_assignment_request` | High | Time-bound assignment request failed |
+| `permanent_assignment_outside_pim` | High | Role granted permanently and outside PIM entirely — standing access with no activation, approval or expiry |
+| `permanent_eligibility_grant` | High | Eligibility granted with **no expiry**, which defeats time-binding. Raised at both request and completion stage, matching the time-bound treatment, so a request that was never granted is visible |
 | `activation_no_actions` | Medium | Privilege activated, nothing done with it — candidate for removal |
 | `activation_on_behalf_of_other` | Medium | One account activated for another |
 | `activation_request_not_completed` | Medium | Requested, no completion within an hour |
@@ -204,6 +215,20 @@ exception. The reviewable anomaly is activating *for another account*.
   as a fallback. This is the highest-value improvement available.
 - **Correlation is temporal, not causal.** An action inside a window is not proof the
   activated role authorised it.
+- **Some audit rows cannot be told apart.** A row identical to another in every exported
+  column except the sub-second timestamp may be a genuinely repeated action or one event
+  emitted more than once — the field that would separate them (`modifiedProperties`, e.g.
+  which app role was granted) is not in the export's column set. They are **kept, not
+  deduplicated**: dropping them could erase real privileged actions, which is the worse
+  error. `audit_content_identical_rows` counts them and `verify_cycle.py` reports the
+  count, so action volume for those events reads as an upper bound. Exporting
+  `modifiedProperties` would resolve this.
+- **An unmapped event type generates no findings.** `KNOWN_ACTIONS` in `correlate.py` lists
+  every PIM action the analysis handles; anything else is counted into
+  `pim_unmapped_actions`, printed as a warning, and carried into the report's limitations.
+  Keep it in step with `KNOWN_ACTIVITIES` in `export_pim_activity.py`, which only controls
+  the manifest note. The analysis-side check is the one that matters, because a file placed
+  by hand never passes through the exporter.
 - **Audit retention is short** — commonly 7 days on Entra ID Free, 30 days on P1/P2. Confirm
   your tenant. If it is 30 days, run the export within the first few business days of the
   following month or the period is gone permanently. A diagnostic-settings feed into Log
@@ -217,11 +242,17 @@ exception. The reviewable anomaly is activating *for another account*.
 python verify_cycle.py --month 2026-08
 ```
 
-Checks that row counts reconcile from raw source through to the workbook, that no output
-sheet has duplicate rows, that exception totals and severity counts agree between
-`correlation-stats-<label>.json` and the CSVs, that every Summary formula recomputed from
-the source CSVs agrees with stats, and that every input file appears in
-`export-manifest.json`.
+Checks that row counts reconcile from raw source through to the workbook — including that
+every audit row dropped along the way is attributable to a named cause (exact duplicate,
+unparseable timestamp, chunk fragment, or PIM's own bookkeeping) — that no output sheet has
+duplicate rows, that chunked events were reassembled, that exception totals and severity
+counts agree between `correlation-stats-<label>.json` and the CSVs, that every Summary
+formula recomputed from the source CSVs agrees with stats, and that every input file
+appears in `export-manifest.json`.
+
+Two conditions are reported as notes rather than failures, because neither should block a
+cycle and both would otherwise go unnoticed: audit rows no exported field can distinguish,
+and PIM event types the analysis does not map.
 
 The Summary sheet holds live formulas, and openpyxl writes formulas without computing
 them - so a freshly built workbook has no cached formula values. Checks that compared
@@ -230,6 +261,23 @@ a stale or tampered Exceptions sheet clear the gate. Verification now recomputes
 formula from the CSVs and compares it to `correlation-stats`, which is the authority for
 every figure the reports use. Cached values are still checked when present, but no check
 depends on them, and a run where nothing could be compared fails rather than passes.
+
+## Drafting attestation requests
+
+After findings are approved, and only if asked:
+
+```bash
+python draft_attestations.py --month 2026-08
+```
+
+Writes one `attestation-<actor>-<label>.md` per actor into `output/`, grouping that actor's
+exceptions into review themes, carrying the advisory recommendation for each exception class,
+itemising the rows an owner needs to see individually, and ending with an empty decision
+table plus the cycle's limitations. Every figure comes from `exceptions-<label>.csv` and
+`correlation-stats-<label>.json`, so no count in a draft is typed by hand.
+
+The drafts are **drafts**. Nothing is sent, no decision is pre-filled, and the keep / modify
+/ revoke call belongs to the role owner. Sending them is a separate approval.
 
 ## Publishing to SharePoint (Phase C)
 

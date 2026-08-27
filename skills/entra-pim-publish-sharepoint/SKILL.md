@@ -14,8 +14,22 @@ description: >
 
 # Publish a review cycle to SharePoint — Phase C
 
-Phase B produced findings and the owner approved them. Your job is to get exactly two
-files into the auditor library, and to refuse if anything about the cycle is not sound.
+Phase B produced findings and the owner approved them. Your job is to get the cycle's
+evidence into the auditor library, and to refuse if anything about it is not sound.
+
+**What goes up**, mirroring the project layout:
+
+```
+<cycle folder>/output/    deliverables, machine-readable CSVs, correlation-stats
+<cycle folder>/input/     raw exports and export-manifest.json
+```
+
+`input/` is the half that matters most, which is counterintuitive. The workbook can be
+regenerated from the raw export any time by re-running Phase B. The raw export cannot be
+regenerated at all — Entra discards the source audit logs within its retention window, so
+after that the CSV in `input/` is the only surviving record of that period anywhere.
+Publishing it also lets an auditor recompute the hashes the workbook's Evidence sheet
+cites, rather than taking them on trust.
 
 **Publishing is a decision, not a step.** Approving the *analysis* does not approve
 *publication* — they are separate, and the second one has to be asked for explicitly.
@@ -36,8 +50,11 @@ helpful:
 - **Never widen the permission ask.** If publication fails for lack of access, report it.
   Do not suggest `Sites.ReadWrite.All` as a fix — the design is `Sites.Selected`, scoped
   to one library, and a tenant-wide write grant is not an acceptable substitute.
-- **Deliverables only.** The workbook and the summary. Raw exports and intermediate CSVs
-  stay in the project folder.
+- **Never publish an input whose hash has drifted.** Every input CSV is checked against
+  `export-manifest.json` immediately before upload. A file that no longer matches its own
+  provenance record must not go to auditors — the workbook cites that hash, and shipping
+  both hands them a chain that fails the moment they check it. Report the mismatch; do not
+  re-register the file to make the error disappear.
 - **Record who approved.** The receipt names a person. "The owner approved it" is not a
   name.
 - **Never notify anyone.** Emailing or messaging auditors is a further outbound action
@@ -99,12 +116,18 @@ Never work around a failed auth. Report it.
 python scripts/publish_month.py --month YYYY-MM --dry-run
 ```
 
-This runs every precondition — label, files present, verification gate, approver — and
-prints the exact destination path and the SHA-256 of each file, without uploading.
+This runs every precondition — label, files present, verification gate, approver, input
+hashes — and prints the exact destination path and the SHA-256 of every file, without
+uploading.
 
-Show the owner: the two file names, their hashes, the destination site, library and
-folder, and the verification result. Then **stop and ask for approval to publish**, and
-ask who is approving it. Do not proceed on an implied yes.
+Show the owner: the file list grouped by `input/` and `output/`, the destination site,
+library and folder, and the verification result. Then **stop and ask for approval to
+publish**, and ask who is approving it. Do not proceed on an implied yes.
+
+If the owner wants deliverables only for a particular cycle, `--outputs-only` omits
+`input/`. Say plainly what that costs — the raw export stays on one workstation, and the
+hashes in the workbook become uncheckable — and make sure that is the intent rather than
+a reflex.
 
 ## Step 4 — Publish
 
@@ -138,6 +161,8 @@ authorised, say so; do not treat its absence as a failure of the upload.
 | `sharepoint.enabled` false | Report that publication is not provisioned. Do not enable it yourself. |
 | 403 on the site | Report it, and say which of app-consent or user-permission is the likely cause. |
 | Destination folder occupied | Stop. Suggest publishing as a re-run rather than adding to it. |
+| Input hash differs from manifest | Stop. Name the file. The evidence chain is broken; do not re-register to silence it. |
+| Input CSV not in the manifest | Stop. Register it with `register_input.py`, then re-verify. |
 | Asked to notify auditors | Separate approval. Not part of this skill. |
 
 ## Reference

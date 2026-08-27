@@ -47,6 +47,9 @@
     "folder_prefix": "Entra PIM Reviews",
 
     "_permission_notes": "Unattended modes need the APPLICATION permission Sites.Selected, plus an administrator granting this app 'write' on this specific site - a tenant-wide Sites.ReadWrite.All grant should not be requested. Interactive mode instead uses DELEGATED Sites.ReadWrite.All and the signed-in user's own library permissions apply.",
+    "_scope_notes": "true publishes input/ and output/ both. The raw export in input/ is the irreplaceable half - Entra discards the source audit logs within its retention window - and publishing it lets auditors recompute the hashes the workbook cites. Set false, or pass --outputs-only, to publish deliverables alone.",
+    "publish_inputs": true,
+
     "require_approver": true
   }
 }

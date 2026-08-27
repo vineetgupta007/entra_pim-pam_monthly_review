@@ -5,16 +5,24 @@ leaves the project folder is a separate approval, and findings are not final if
 verification fails. Automatically uploading at the end of Phase B would break both:
 a cycle that failed verify_cycle.py could reach auditors before anyone read the failure.
 
-What is published: the two deliverables only.
+What is published: the whole evidence set, mirroring the project layout.
 
-    entra-pim-correlation-<label>.xlsx
-    entra-pim-review-summary-<label>.docx
+    <cycle>/output/   deliverables, machine-readable CSVs, correlation-stats
+    <cycle>/input/    raw exports and export-manifest.json
 
-Raw input exports and intermediate CSVs stay in the project folder. The workbook's
-Evidence sheet already reproduces export-manifest.json in full - file name, source,
-endpoint, filter, period, row count, sha256, export timestamp - so an auditor can read
-the whole provenance chain from the published workbook and request the raw export
-separately, verifying it against the recorded hash.
+input/ matters more than it first appears. The workbook can be regenerated from the raw
+export at any time by re-running Phase B; the raw export cannot be regenerated at all,
+because Entra discards the source audit logs within its retention window. After that the
+CSV in input/ is the only surviving record of the period anywhere, so leaving it on one
+workstation while the reproducible artefact goes to a retention-protected library has the
+risk backwards. Publishing both also lets an auditor recompute the hashes the workbook's
+Evidence sheet cites, rather than taking them on trust.
+
+Input files are hash-checked against export-manifest.json immediately before upload. A
+file that no longer matches its own provenance record blocks publication.
+
+Pass --outputs-only (or set sharepoint.publish_inputs false) to publish deliverables
+alone; the receipt records which was done.
 
 Preconditions, all of which must hold or nothing uploads:
 
@@ -47,7 +55,8 @@ from pathlib import Path
 
 import requests
 
-from common import PROJECT_ROOT, load_config, month_folder_name, month_paths, sha256_file
+from common import (MONTH_NAMES, PROJECT_ROOT, load_config, month_folder_name,
+                    month_paths, sha256_file)
 from graph_client import GRAPH_ROOT, GraphAuthError, GraphClient, GraphPermissionError
 
 SITES_DELEGATED_SCOPE = "https://graph.microsoft.com/Sites.ReadWrite.All"
@@ -59,6 +68,28 @@ class PublishError(RuntimeError):
     """A precondition failed. Nothing has been uploaded."""
 
 
+def cycle_folder_name(month: str, run: int, sp: dict) -> str:
+    """Name of the per-cycle folder in SharePoint.
+
+    'period'    -> 2026-06   (matches the project's period labels and sorts correctly)
+    'monthyear' -> June2026  (matches folders already in some libraries)
+
+    Configurable because an existing library may already have a convention, and
+    consistency inside the library matters more than matching the project folder.
+    """
+    style = (sp.get("cycle_folder_style") or "period").strip().casefold()
+    if style == "monthyear":
+        base = f"{MONTH_NAMES[int(month.split('-')[1])]}{month.split('-')[0]}"
+    elif style == "period":
+        base = month
+    else:
+        raise PublishError(
+            f"Unknown sharepoint.cycle_folder_style {style!r}; "
+            f"use 'period' (2026-06) or 'monthyear' (June2026)."
+        )
+    return base if run <= 1 else f"{base}-{run}"
+
+
 # ------------------------------------------------------------------ preconditions
 
 def deliverables(outdir: Path, label: str) -> list[Path]:
@@ -66,6 +97,68 @@ def deliverables(outdir: Path, label: str) -> list[Path]:
         outdir / f"entra-pim-correlation-{label}.xlsx",
         outdir / f"entra-pim-review-summary-{label}.docx",
     ]
+
+
+def skip_file(p: Path, label: str) -> bool:
+    """Files that must never be uploaded."""
+    n = p.name
+    return (
+        n.startswith(".~lock")               # LibreOffice lock artefacts
+        or n.startswith("~$")                # Word/Excel lock artefacts
+        or n.startswith(".")
+        or n.startswith("publication-receipt")  # written after upload; not evidence
+    )
+
+
+def collect_payload(inp: Path, out: Path, label: str, include_inputs: bool
+                    ) -> dict[str, list[Path]]:
+    """Everything to publish, grouped by the subfolder it lands in.
+
+    output/ carries the deliverables plus the machine-readable CSVs and stats JSON, all
+    of which CLAUDE.md lists as deliverables. input/ carries the raw exports and the
+    manifest - the irreplaceable part, since Entra discards the source audit logs within
+    its retention window and these files become the only surviving record of the period.
+    """
+    payload: dict[str, list[Path]] = {}
+
+    outs = sorted(p for p in out.iterdir()
+                  if p.is_file() and not skip_file(p, label) and label in p.name)
+    payload["output"] = outs
+
+    if include_inputs:
+        ins = sorted(p for p in inp.iterdir() if p.is_file() and not skip_file(p, label))
+        payload["input"] = ins
+
+    return payload
+
+
+def verify_input_hashes(inp: Path, files: list[Path]) -> list[str]:
+    """Every input CSV must match the hash recorded in export-manifest.json.
+
+    A file whose content no longer matches its own provenance record must not be
+    published: the workbook's Evidence sheet cites that hash, so shipping a changed file
+    would hand auditors a chain that fails the moment they check it.
+    """
+    from common import read_manifest
+
+    manifest = read_manifest(inp)
+    entries = {e.get("file"): e for e in manifest.get("entries", [])}
+    problems: list[str] = []
+
+    for f in files:
+        if f.suffix.lower() != ".csv":
+            continue
+        entry = entries.get(f.name)
+        if entry is None:
+            problems.append(f"{f.name}: not registered in export-manifest.json")
+            continue
+        recorded = (entry.get("sha256") or "").strip().lower()
+        actual = sha256_file(f).lower()
+        if recorded and recorded != actual:
+            problems.append(
+                f"{f.name}: content does not match its manifest hash\n"
+                f"      manifest {recorded[:24]}...  actual {actual[:24]}...")
+    return problems
 
 
 def check_label(label: str) -> None:
@@ -186,6 +279,17 @@ def graph_get(client: GraphClient, url: str) -> dict:
     return resp.json()
 
 
+def _drive_url_name(drive: dict) -> str:
+    """The library's URL segment, which often differs from its display name.
+
+    The default library displays as 'Documents' but sits at /Shared Documents, and a
+    SharePoint URL only ever shows the latter. Matching both means a name copied
+    straight out of a browser address bar resolves."""
+    web = (drive.get("webUrl") or "").rstrip("/")
+    from urllib.parse import unquote
+    return unquote(web.rsplit("/", 1)[-1]) if web else ""
+
+
 def resolve_drive(client: GraphClient, sp: dict) -> tuple[dict, dict]:
     """Resolve the site, then the named document library (drive) inside it."""
     host, path = sp["site_hostname"], sp["site_path"].rstrip("/")
@@ -195,10 +299,17 @@ def resolve_drive(client: GraphClient, sp: dict) -> tuple[dict, dict]:
     for d in drives:
         if (d.get("name") or "").strip().casefold() == wanted:
             return site, d
-    names = ", ".join(repr(d.get("name")) for d in drives) or "(none visible)"
+    for d in drives:  # second pass: match the URL name, e.g. 'Shared Documents'
+        if _drive_url_name(d).strip().casefold() == wanted:
+            return site, d
+    names = ", ".join(
+        f"{d.get('name')!r} (url: {_drive_url_name(d)!r})" for d in drives
+    ) or "(none visible)"
     raise PublishError(
         f"Document library {sp['library']!r} not found on {host}{path}.\n"
-        f"  Libraries visible to this identity: {names}"
+        f"  Libraries visible to this identity: {names}\n"
+        f"  Note the display name and the URL name differ for the default library:\n"
+        f"  it displays as 'Documents' but appears in URLs as 'Shared Documents'."
     )
 
 
@@ -323,11 +434,13 @@ def main() -> int:
                     help="test SharePoint access only; no preconditions, no upload")
     ap.add_argument("--force", action="store_true",
                     help="proceed even if the destination folder is non-empty (still never overwrites)")
+    ap.add_argument("--outputs-only", action="store_true",
+                    help="publish output/ only, omitting the raw exports in input/")
     args = ap.parse_args()
 
     label = args.label or args.month
     paths = month_paths(args.month, args.run)
-    outdir = paths["output"]
+    outdir, indir = paths["output"], paths["input"]
     folder = month_folder_name(args.month, args.run)
 
     cfg = load_config(args.config)
@@ -355,30 +468,52 @@ def main() -> int:
         print("\n  Access OK. This proves read access; the first real upload proves write.")
         return 0
 
+    include_inputs = bool(sp.get("publish_inputs", True)) and not args.outputs_only
+
     # Preconditions. Any failure means nothing was uploaded.
     try:
         check_label(label)
-        files = check_files(outdir, label)
+        check_files(outdir, label)  # the two deliverables must exist
         approver = check_approver(args.approved_by, sp)
         print("\n  Re-running the verification gate...")
         verify_out = check_verification(args.month, args.run, label)
         passed = [ln for ln in verify_out.splitlines() if "passed" in ln]
         print(f"    {passed[-1].strip() if passed else 'verification passed'}")
+
+        payload = collect_payload(indir, outdir, label, include_inputs)
+        if include_inputs:
+            problems = verify_input_hashes(indir, payload.get("input", []))
+            if problems:
+                raise PublishError(
+                    "Refusing to publish: input file(s) do not match export-manifest.json\n"
+                    + "\n".join(f"    {p}" for p in problems)
+                    + "\n  The workbook's Evidence sheet cites these hashes. Publishing a\n"
+                      "  file that no longer matches its own provenance record would hand\n"
+                      "  auditors a chain that fails the moment they check it."
+                )
+            print(f"    input hashes match export-manifest.json")
     except PublishError as exc:
         print(f"\n{exc}")
         return 2
 
-    segments = [s for s in [sp.get("folder_prefix"), args.month if args.run <= 1
-                            else f"{args.month}-{args.run}"] if s]
+    # folder_prefix may be a nested path ("General/PIM_Access_Reviews"), so split it -
+    # Graph creates one folder per call and a slash in a name is not a path.
+    segments = [s.strip() for s in (sp.get("folder_prefix") or "").split("/") if s.strip()]
+    segments.append(cycle_folder_name(args.month, args.run, sp))
+    total = sum(len(v) for v in payload.values())
     print(f"\n  approver: {approver}")
-    print(f"  files:")
-    for f in files:
-        print(f"    {f.name}  ({f.stat().st_size:,} bytes, sha256 {sha256_file(f)[:16]}...)")
     print(f"  destination: {sp['site_hostname']}{sp['site_path']} / "
           f"{sp['library']} / {'/'.join(segments)}")
+    for sub in ("output", "input"):
+        for f in payload.get(sub, []):
+            print(f"    {sub}/{f.name}  ({f.stat().st_size:,} bytes, "
+                  f"sha256 {sha256_file(f)[:16]}...)")
+    if not include_inputs:
+        print("    (input/ omitted - raw exports are not being published)")
 
     if args.dry_run:
-        print("\n  DRY RUN - preconditions passed, nothing uploaded.")
+        print(f"\n  DRY RUN - preconditions passed, {total} file(s) would upload, "
+              f"nothing sent.")
         return 0
 
     try:
@@ -394,17 +529,23 @@ def main() -> int:
             return 2
 
         uploaded = []
-        for f in files:
-            item = upload(client, drive["id"], target["id"], f)
-            uploaded.append({
-                "file": f.name,
-                "sha256_local": sha256_file(f),
-                "size_bytes": f.stat().st_size,
-                "item_id": item.get("id"),
-                "web_url": item.get("webUrl"),
-                "etag": item.get("eTag"),
-            })
-            print(f"    uploaded {f.name}")
+        for sub in ("output", "input"):
+            files = payload.get(sub, [])
+            if not files:
+                continue
+            subfolder = ensure_folder(client, drive["id"], segments + [sub])
+            for f in files:
+                item = upload(client, drive["id"], subfolder["id"], f)
+                uploaded.append({
+                    "folder": sub,
+                    "file": f.name,
+                    "sha256_local": sha256_file(f),
+                    "size_bytes": f.stat().st_size,
+                    "item_id": item.get("id"),
+                    "web_url": item.get("webUrl"),
+                    "etag": item.get("eTag"),
+                })
+                print(f"    uploaded {sub}/{f.name}")
     except (GraphAuthError, GraphPermissionError, PublishError) as exc:
         print(f"\n{exc}")
         return 2
@@ -421,9 +562,17 @@ def main() -> int:
         "library": drive.get("name"),
         "folder": "/".join(segments),
         "folder_web_url": target.get("webUrl"),
+        "inputs_published": include_inputs,
         "files": uploaded,
-        "note": ("Deliverables only. Provenance for every figure is inside the workbook's "
-                 "Evidence sheet, which reproduces export-manifest.json."),
+        "note": (
+            "Published under input/ and output/. Input hashes were verified against "
+            "export-manifest.json immediately before upload, so the chain the workbook's "
+            "Evidence sheet cites is checkable against the files beside it."
+            if include_inputs else
+            "Deliverables only; input/ was omitted. Provenance for every figure is inside "
+            "the workbook's Evidence sheet, which reproduces export-manifest.json, but the "
+            "raw exports it cites are not present in this library."
+        ),
     }
     receipt_path = outdir / f"publication-receipt-{label}.json"
     receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")

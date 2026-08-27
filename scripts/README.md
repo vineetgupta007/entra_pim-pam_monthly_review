@@ -292,10 +292,28 @@ python publish_month.py --month 2026-08 --dry-run                     # precondi
 python publish_month.py --month 2026-08 --approved-by "Vineet Gupta"  # publish
 ```
 
-Only the two deliverables are published — the workbook and the executive summary. Raw
-exports and intermediate CSVs stay in the project folder; the workbook's `Evidence` sheet
-already reproduces `export-manifest.json`, so an auditor can read the full provenance
-chain from the published file and verify any raw export against the recorded sha256.
+The whole evidence set is published, mirroring the project layout:
+
+```
+<cycle folder>/output/    deliverables, machine-readable CSVs, correlation-stats
+<cycle folder>/input/     raw exports and export-manifest.json
+```
+
+`input/` is the half that matters most, which is not obvious. The workbook can be
+regenerated from the raw export any time by re-running Phase B; the raw export cannot be
+regenerated at all, because Entra discards the source audit logs within its retention
+window. After that the CSV in `input/` is the only surviving record of the period
+anywhere, so keeping it on one workstation while the reproducible artefact goes to a
+retention-protected library gets the risk backwards. Publishing both also lets an auditor
+recompute the hashes the workbook's `Evidence` sheet cites instead of trusting them.
+
+Input files are hash-checked against `export-manifest.json` immediately before upload. A
+file whose content has drifted from its own provenance record blocks publication — note
+that `verify_cycle.py` checks only that every input is *listed* in the manifest, not that
+its hash still matches, so this is a genuinely additional gate.
+
+Pass `--outputs-only`, or set `sharepoint.publish_inputs` false, to publish deliverables
+alone. The receipt records which was done.
 
 Four preconditions, all enforced. Any failure means nothing uploads:
 

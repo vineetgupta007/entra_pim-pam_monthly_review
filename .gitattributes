@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Line endings
+#
+# This repo is edited from at least two places - a Windows VDI (CRLF) and tooling
+# that writes LF - which made git report whole files as rewritten when only the
+# line endings differed. A 1,533-insertion / 1,533-deletion diff on an unchanged
+# file makes review impossible and buries real changes.
+#
+# text=auto normalises text files to LF in the repository and checks them out with
+# the platform's native endings, so both editors stay happy and diffs stay honest.
+# ---------------------------------------------------------------------------
+* text=auto
+
+# ---------------------------------------------------------------------------
+# Files that must keep a specific ending regardless of platform
+# ---------------------------------------------------------------------------
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.sh   text eol=lf
+
+# ---------------------------------------------------------------------------
+# Evidence - never normalise
+#
+# The sha256 of every input export is recorded in export-manifest.json, cited by
+# the workbook's Evidence sheet, and re-checked by publish_month.py immediately
+# before upload. Any rewrite of line endings changes those bytes and therefore the
+# hash, which would break the evidence chain and block publication.
+#
+# Cycle data is gitignored today (*/input/, */output/), so this is defence in
+# depth against a future force-add rather than a live problem. Deliberate, because
+# a corrupted hash would surface as a confusing publication failure months later.
+# ---------------------------------------------------------------------------
+*.csv   -text
+*.xlsx  -text
+*.xlsm  -text
+*.docx  -text
+*.dotx  -text
+*.pdf   -text
+
+# ---------------------------------------------------------------------------
+# Binary / credential material - never diffed, never normalised
+# ---------------------------------------------------------------------------
+*.pem   -text
+*.pfx   -text
+*.cer   -text
+*.png   -text
+*.jpg   -text
+
+# ---------------------------------------------------------------------------
+# Diff hints
+# ---------------------------------------------------------------------------
+*.py    diff=python
+*.md    diff=markdown

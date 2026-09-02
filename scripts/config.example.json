@@ -14,8 +14,8 @@
 
     "_unattended_notes": "secret_env and certificate use APPLICATION permissions of the same three names. Task Scheduler does not inherit your shell's environment, so set the secret as a persistent user or machine variable - or prefer certificate mode.",
     "secret_env_var": "ENTRA_CLIENT_SECRET",
-    "certificate_pem_path": null,
-    "certificate_thumbprint": null
+    "certificate_pem_path": "C:\\Users\\Certs\\EntraAppCert.pem",
+    "certificate_thumbprint": ""
   },
 
   "activation_window_hours": 8,

@@ -102,6 +102,47 @@ role is PIM-*eligible* rather than active, **activate it first**; eligibility gr
 
 `check_auth.py` distinguishes these cases by name rather than leaving you with a bare 403.
 
+### Generating a certificate for `certificate` mode
+
+Three artefacts come out of this: a `.cer` (public key, uploaded to the app registration), a
+`.pfx` (both keys, password-protected, an intermediate), and a `.pem` (private key, unencrypted,
+referenced from `config.json`). Only the `.cer` ever reaches Entra.
+
+```powershell
+$cert = New-SelfSignedCertificate -Subject "CN=EntraAppCert" -CertStoreLocation "Cert:\CurrentUser\My" `
+    -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -KeyAlgorithm RSA -HashAlgorithm SHA256
+```
+
+Creates a 2048-bit self-signed cert in the current user's certificate store and keeps a
+reference to it in `$cert` for the exports below.
+
+```powershell
+Export-Certificate -Cert $cert -FilePath "C:\Users\VineetGupta\Certs\EntraAppCert.cer"
+```
+
+Writes out the **public key only**. This is the file uploaded under the app registration's
+**Certificates & secrets → Certificates** tab — it proves nothing on its own, so it is safe
+outside the credential exclusions above.
+
+```powershell
+$pwd = ConvertTo-SecureString -String "YourStrongPassword123!" -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath "C:\Users\VineetGupta\Certs\EntraAppCert.pfx" -Password $pwd
+```
+
+`Export-PfxCertificate` requires either a password or `-ProtectTo` — a PFX cannot be exported
+with neither, since the format itself needs some protection mechanism. The password only
+protects this **intermediate file**; it does not carry through to the `.pem` below, and does
+not need to be remembered afterward.
+
+```bash
+openssl pkcs12 -in "C:\Users\VineetGupta\Certs\EntraAppCert.pfx" -out "C:\Users\VineetGupta\Certs\EntraAppCert.pem" -nodes -password pass:YourStrongPassword123!
+```
+
+Converts to PEM and strips the password with `-nodes`, since `graph_client.py` loads the
+private key with no password (`certificate_pem_path` in `config.json`). Delete the `.pfx`
+once the `.pem` is confirmed working — `check_auth.py --auth-mode certificate` proves it —
+so the private key exists on disk in exactly one unencrypted file.
+
 ### Token cache
 
 With `auth.cache_tokens: true` the refresh token is cached so re-runs are silent for days.

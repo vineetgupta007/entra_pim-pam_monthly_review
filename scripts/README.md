@@ -373,6 +373,66 @@ grants nothing until that second step happens, which is what makes it safer than
 tenant-wide `Sites.ReadWrite.All`. Interactive mode instead requests delegated
 `Sites.ReadWrite.All`, and the signed-in user's own library permissions apply on top.
 
+### Scoping the grant to one folder instead of the whole site
+
+The target for this project is one folder, not the whole site —
+`REPLACE_WITH_TENANT.sharepoint.com/sites/InfoSec`'s `Shared Documents/General/PIM_Access_Reviews`,
+inside a site that also holds unrelated InfoSec content. `Grant-PnPEntraIDAppSitePermission`
+grants `write` across the entire site's document library, which is broader than
+`publish_month.py` needs. The narrower alternative uses a different Graph permission
+(`Files.SelectedOperations.Selected`, not `Sites.Selected`) scoped to the one folder's
+`driveItem`, so the app cannot see or touch anything else in `InfoSec` — including other
+folders in the same library.
+
+Register `Files.SelectedOperations.Selected` (Application permission, admin-consented) on
+the app in addition to, or instead of, `Sites.Selected` depending on which grant is used.
+
+Resolve the folder's `driveId` and `itemId` from its sharing URL — Graph has no direct
+path-to-ID lookup, so this goes through the `/shares` endpoint:
+
+```powershell
+Connect-MgGraph -Scopes "Sites.FullControl.All"   # the granting account needs this either way
+
+$url = "<the folder's sharing URL, e.g. from Copy Link in SharePoint>"
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($url)
+$base64 = [System.Convert]::ToBase64String($bytes).TrimEnd('=').Replace('/','_').Replace('+','-')
+$encodedShareId = "u!$base64"
+
+$item = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/shares/$encodedShareId/driveItem?`$select=id,name,parentReference"
+$item   # confirm .name matches the intended folder before granting anything
+```
+
+Then grant `write` on that folder to the app:
+
+```powershell
+$driveId = $item.parentReference.driveId
+$itemId  = $item.id
+
+$body = @{
+    roles = @("write")
+    grantedToV2 = @{
+        application = @{
+            id          = "<client_id>"
+            displayName = "entra-pim-review"
+        }
+    }
+} | ConvertTo-Json -Depth 5
+
+Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/drives/$driveId/items/$itemId/permissions" -Body $body -ContentType "application/json"
+```
+
+| | Site-level (`Sites.Selected`) | Folder-level (`Files.SelectedOperations.Selected`) |
+|---|---|---|
+| Grant endpoint | `/sites/{id}/permissions` | `/drives/{id}/items/{id}/permissions` |
+| JSON key | `grantedToIdentities` | `grantedToV2` |
+| App can browse the rest of the site | Yes | No — confined to this folder and its contents |
+| Granting account needs | `Sites.FullControl.All` | Same |
+
+Run `publish_month.py --check` against whichever scope is chosen before trusting it for a
+real cycle — folder-scoped grants are exercised far less often than site-level ones and are
+worth confirming end-to-end rather than assumed to work from the theory above.
+
+
 Configure the destination under `sharepoint` in `config.json`. `enabled` stays false until
 the library exists, consent is granted, and a retention label is applied — see
 `docs/entra-pim-sharepoint-publication-design.docx`.

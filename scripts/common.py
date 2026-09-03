@@ -77,6 +77,42 @@ def month_bounds(month: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+# Graph's auditLogs/directoryAudits and auditLogs/signIns endpoints only retain the
+# trailing ~30 days regardless of license tier (P1/P2 does not extend this; only a
+# diagnostic-settings export to Log Analytics/storage, running continuously, does -
+# and only from the point it was enabled onward). Requesting a start date before the
+# floor doesn't return partial data, it 400s the whole query - so callers must clamp
+# before calling the API, not after.
+RETENTION_DAYS = 30
+
+
+def clamp_to_retention(start: datetime, end: datetime,
+                        now: datetime | None = None) -> tuple[datetime, datetime, str | None]:
+    """Clamp `start` to Graph's retention floor if the requested range reaches past it.
+
+    Returns (clamped_start, end, warning) - warning is None if no clamping was needed.
+    This trades a hard failure for a documented gap: the run still produces a report for
+    the days that ARE retrievable, and the manifest records exactly which days were lost
+    to retention rather than silently omitting them.
+    """
+    now = now or datetime.now(timezone.utc)
+    floor = now - timedelta(days=RETENTION_DAYS)
+    if start >= floor:
+        return start, end, None
+    if end <= floor:
+        raise SystemExit(
+            f"Entire requested range ({start:%Y-%m-%d} .. {end:%Y-%m-%d}) is older than "
+            f"Graph's {RETENTION_DAYS}-day retention floor ({floor:%Y-%m-%d}). Nothing to export - "
+            "this data is permanently gone from Graph, not recoverable by any query shape."
+        )
+    lost_days = (floor - start).days
+    warning = (f"retention gap: requested start {start:%Y-%m-%d} is before Graph's "
+               f"{RETENTION_DAYS}-day floor ({floor:%Y-%m-%d}) as of this run; "
+               f"{lost_days} day(s) at the start of the period are permanently unavailable "
+               f"and excluded from this export")
+    return floor, end, warning
+
+
 def month_folder_name(month: str, run: int = 1) -> str:
     """'2026-08', run 1 -> 'August'; run 2 -> 'August-2' (per CLAUDE.md convention)."""
     _, mon = (int(p) for p in month.split("-"))

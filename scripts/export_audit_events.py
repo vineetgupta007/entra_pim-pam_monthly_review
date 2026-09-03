@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import (load_config, manifest_entry, month_bounds, month_paths, norm_upn,
+from common import (clamp_to_retention, load_config, manifest_entry, month_bounds, month_paths, norm_upn,
                    record_manifest, record_manifest as _rm)
 from graph_client import GraphAuthError, GraphClient, directory_audit_params
 
@@ -79,7 +79,10 @@ def main() -> int:
 
     cfg = load_config(args.config)
     start, end = month_bounds(args.month)
+    start, end, retention_warning = clamp_to_retention(start, end)
     paths = month_paths(args.month, args.run)
+    if retention_warning:
+        print(f"  WARNING: {retention_warning}")
 
     actors_path = paths["input"] / f"pim-actors-{args.month}.json"
     actors = []
@@ -152,6 +155,8 @@ def main() -> int:
         notes.append(f"fallback_reason={fallback_reason}")
     if not rows:
         notes.append("NO ROWS RETURNED - check retention window and permissions")
+    if retention_warning:
+        notes.append(retention_warning)
 
     record_manifest(paths["input"], manifest_entry(
         out, source="Microsoft Graph", endpoint="/v1.0/auditLogs/directoryAudits",

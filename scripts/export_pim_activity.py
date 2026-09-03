@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import (load_config, manifest_entry, month_bounds, month_paths,
-                   record_manifest, slugify_activity, to_epoch_ms)
+from common import (clamp_to_retention, load_config, manifest_entry, month_bounds,
+                   month_paths, record_manifest, slugify_activity, to_epoch_ms)
 from graph_client import GraphAuthError, GraphClient, directory_audit_params
 
 COLUMNS = ["@timestamp", "Source User", "Source User Action", "Destination User",
@@ -124,9 +124,12 @@ def main() -> int:
 
     cfg = load_config(args.config)
     start, end = month_bounds(args.month)
+    start, end, retention_warning = clamp_to_retention(start, end)
     paths = month_paths(args.month, args.run)
 
     print(f"PIM activity export for {args.month}  [{start:%Y-%m-%d} .. {end:%Y-%m-%d})")
+    if retention_warning:
+        print(f"  WARNING: {retention_warning}")
 
     client = GraphClient(cfg, auth_mode=args.auth_mode)
     flt, params = directory_audit_params(start, end, "loggedByService eq 'PIM'")
@@ -168,6 +171,8 @@ def main() -> int:
                      f" .. {from_epoch_ms(last):%Y-%m-%d %H:%M}Z")
     else:
         notes.append("NO ROWS RETURNED - check retention window and permissions")
+    if retention_warning:
+        notes.append(retention_warning)
     if unmapped:
         notes.append("unmapped activityDisplayName: "
                      + ", ".join(f"{k}={v}" for k, v in sorted(unmapped.items())))

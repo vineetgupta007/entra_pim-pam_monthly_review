@@ -71,7 +71,8 @@ def main() -> int:
     ap.add_argument("--month", required=True, help="YYYY-MM")
     ap.add_argument("--run", type=int, default=1)
     ap.add_argument("--config", default=None)
-    ap.add_argument("--auth-mode", choices=["interactive", "secret_env", "certificate"],
+    ap.add_argument("--auth-mode",
+                    choices=["interactive", "secret_env", "certificate", "token_passthrough"],
                     default=None, help="override config.json auth.mode for this run")
     ap.add_argument("--all-actors", action="store_true",
                     help="skip per-actor scoping and pull the full period for every actor")

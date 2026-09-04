@@ -118,7 +118,8 @@ def main() -> int:
     ap.add_argument("--month", required=True, help="YYYY-MM")
     ap.add_argument("--run", type=int, default=1, help="re-run number (August-2 etc.)")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--auth-mode", choices=["interactive", "secret_env", "certificate"],
+    ap.add_argument("--auth-mode",
+                    choices=["interactive", "secret_env", "certificate", "token_passthrough"],
                     default=None, help="override config.json auth.mode for this run")
     args = ap.parse_args()
 

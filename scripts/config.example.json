@@ -5,17 +5,21 @@
   "client_id": "REPLACE_WITH_APP_REGISTRATION_CLIENT_ID",
 
   "auth": {
-    "_mode_options": "interactive | secret_env | certificate. Override for one run with --auth-mode.",
+    "_mode_options": "interactive | secret_env | certificate | token_passthrough. Override for one run with --auth-mode.",
     "mode": "interactive",
 
     "_interactive_notes": "Opens your browser. Needs DELEGATED AuditLog.Read.All, Directory.Read.All, RoleManagement.Read.Directory (admin-consented) AND a 'http://localhost' redirect URI under 'Mobile and desktop applications'. The signed-in user must also hold Global Reader, Reports Reader, or Security Reader - consent alone is not enough.",
     "cache_tokens": true,
     "token_cache_path": null,
 
-    "_unattended_notes": "secret_env and certificate use APPLICATION permissions of the same three names. Task Scheduler does not inherit your shell's environment, so set the secret as a persistent user or machine variable - or prefer certificate mode.",
+    "_unattended_notes": "secret_env, certificate, and token_passthrough use APPLICATION permissions of the same three names. Task Scheduler does not inherit your shell's environment, so set the secret as a persistent user or machine variable - or prefer certificate/token_passthrough mode.",
     "secret_env_var": "ENTRA_CLIENT_SECRET",
     "certificate_pem_path": "C:\\Users\\Certs\\EntraAppCert.pem",
-    "certificate_thumbprint": ""
+    "certificate_thumbprint": "",
+
+    "_token_passthrough_notes": "Preferred over 'certificate' when the private key must never touch disk. The key stays non-exportable in the Windows certificate store; scripts/Get-GraphToken.ps1 has Windows sign the token request and exports only the resulting short-lived token via this environment variable. token_passthrough_thumbprint identifies that store certificate - it is deliberately a separate field from certificate_thumbprint above, since that one belongs to the older PEM-based flow and may be a different certificate entirely. Test independently with: python check_auth.py --auth-mode token_passthrough",
+    "token_env_var": "GRAPH_ACCESS_TOKEN",
+    "token_passthrough_thumbprint": null
   },
 
   "activation_window_hours": 8,

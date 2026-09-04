@@ -9,6 +9,16 @@ Auth modes (config["auth"]["mode"], overridable with --auth-mode):
   "secret_env"   - unattended. Client secret read from the environment variable named
                    in config["auth"]["secret_env_var"]. APPLICATION permissions.
   "certificate"  - unattended, preferred over a secret. Needs PyJWT + cryptography.
+                   The private key lives in a PEM file on disk that Python reads directly.
+  "token_passthrough" - unattended, cert-backed like "certificate", but the private key
+                   never touches disk or the Python process. A non-exportable certificate
+                   stays in the Windows certificate store (Cert:\\CurrentUser\\My); a
+                   PowerShell wrapper (scripts/Get-GraphToken.ps1) has Windows sign the
+                   token request internally and exports only the resulting short-lived
+                   bearer token via an environment variable. Python trusts that token as-is
+                   and never sees the key. Test independently with:
+                       .\\scripts\\Get-GraphToken.ps1 -Thumbprint <thumb> -ClientId <id> -TenantId <id>
+                       python check_auth.py --auth-mode token_passthrough
 
 The two permission types are not interchangeable. Interactive needs delegated
 AuditLog.Read.All / Directory.Read.All / RoleManagement.Read.Directory plus a
@@ -56,7 +66,7 @@ AUDIT_CAPABLE_ROLES = [
     "Security Administrator", "Security Operator", "Global Administrator",
 ]
 
-UNATTENDED_MODES = ("secret_env", "certificate")
+UNATTENDED_MODES = ("secret_env", "certificate", "token_passthrough")
 
 
 def default_token_cache_path() -> Path:
@@ -237,6 +247,44 @@ class GraphClient:
             headers={"x5t": x5t},
         )
 
+    def _token_passthrough(self) -> str:
+        """Read a bearer token an external process (PowerShell + Windows cert store)
+        already acquired. Python never sees the private key - only this short-lived
+        token, which it treats as opaque and un-renewable: when it expires, the wrapper
+        script must be re-run to mint a new one.
+        """
+        var = self.auth_cfg.get("token_env_var", "GRAPH_ACCESS_TOKEN")
+        tok = os.environ.get(var)
+        if not tok:
+            raise GraphAuthError(
+                f"Environment variable {var} is not set.\n"
+                f"Run the wrapper first, in the SAME shell you'll launch Python from "
+                f"(the token must be exported into THIS process's environment). It reads "
+                f"client_id/tenant_id/thumbprint from config.json automatically:\n"
+                f"  PowerShell:  .\\scripts\\Get-GraphToken.ps1\n"
+                f"  git-bash:    export {var}=$(powershell.exe -NoProfile -File "
+                f"./scripts/Get-GraphToken.ps1 -Raw)"
+            )
+
+        import base64
+        try:
+            payload_b64 = tok.split(".")[1]
+            payload_b64 += "=" * (-len(payload_b64) % 4)  # restore stripped padding
+            claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+            exp = claims.get("exp")
+        except Exception as exc:
+            raise GraphAuthError(
+                f"{var} does not look like a JWT access token: {exc}"
+            ) from exc
+
+        if exp and datetime.now(timezone.utc).timestamp() >= exp:
+            raise GraphAuthError(
+                f"Token in {var} has expired. Re-run Get-GraphToken.ps1 to mint a fresh one - "
+                f"tokens from this flow are short-lived (typically ~1 hour) and are never "
+                f"auto-renewed by Python, since Python has no way to re-sign a request."
+            )
+        return tok
+
     def token(self) -> str:
         if self._token and datetime.now(timezone.utc) < self._expires_at:
             return self._token
@@ -249,6 +297,20 @@ class GraphClient:
             self._expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=int(result.get("expires_in", 3600)) - 120
             )
+            return self._token
+
+        if mode == "token_passthrough":
+            self._token = self._token_passthrough()
+            payload_b64 = self._token.split(".")[1]
+            payload_b64 += "=" * (-len(payload_b64) % 4)
+            import base64
+            exp = json.loads(base64.urlsafe_b64decode(payload_b64)).get("exp")
+            # 60s safety margin, matching the other modes' pattern of renewing early
+            self._expires_at = (datetime.fromtimestamp(exp, tz=timezone.utc) -
+                                timedelta(seconds=60)) if exp else \
+                                datetime.now(timezone.utc) + timedelta(minutes=5)
+            if self.verbose:
+                print(f"  auth ok (mode={mode}, token supplied by Get-GraphToken.ps1)")
             return self._token
 
         data = {"client_id": self.client_id, "scope": SCOPE, "grant_type": "client_credentials"}
@@ -271,7 +333,7 @@ class GraphClient:
         else:
             raise GraphAuthError(
                 f"Unknown auth mode {mode!r}; use 'interactive', 'secret_env', "
-                f"or 'certificate'.")
+                f"'certificate', or 'token_passthrough'.")
 
         url = f"{LOGIN_ROOT}/{self.tenant_id}/oauth2/v2.0/token"
         try:

@@ -3,6 +3,8 @@
   python check_auth.py                        # uses config.json's auth.mode
   python check_auth.py --auth-mode interactive
   python check_auth.py --auth-mode secret_env
+  python check_auth.py --auth-mode token_passthrough   # after running Get-GraphToken.ps1
+                                                        # in the SAME shell
 
 Run it once interactively, then once in secret_env mode. Only schedule the export after
 BOTH come back green - that is the whole point of this script.
@@ -46,7 +48,8 @@ def emit(status: str, title: str, detail: str = "") -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify Graph auth and permissions.")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--auth-mode", choices=["interactive", "secret_env", "certificate"],
+    ap.add_argument("--auth-mode",
+                    choices=["interactive", "secret_env", "certificate", "token_passthrough"],
                     default=None, help="override config.json for this run")
     args = ap.parse_args()
 
@@ -170,6 +173,14 @@ def main() -> int:
         print("      python check_auth.py --auth-mode secret_env")
         print(f"  which needs the same three names granted as APPLICATION permissions: "
               f"{', '.join(REQUIRED_APP_PERMISSIONS)}")
+    elif mode == "token_passthrough":
+        print("\n  Unattended access confirmed for THIS token - but it expires in under an "
+              "hour and is not auto-renewed.")
+        print("  run_export.cmd is hardcoded to --auth-mode secret_env and does NOT call "
+              "Get-GraphToken.ps1 - scheduling it as-is will NOT use this mode.")
+        print("  For unattended token_passthrough, a scheduled task must run "
+              "Get-GraphToken.ps1 and run_month.py back-to-back in one job, in that order, "
+              "every time - there is currently no .cmd wrapper that does this for you.")
     else:
         print("\n  Unattended access confirmed. Safe to schedule run_export.cmd.")
     return 0

@@ -72,7 +72,7 @@ Then install the skill — one copy step, see `../skills/install_skill.md`.
 
 ## Authentication
 
-Three modes. Set `auth.mode` in `config.json`, or override for a single run with
+Four modes. Set `auth.mode` in `config.json`, or override for a single run with
 `--auth-mode`. Default is `interactive`, so a fresh clone works with no secret to move
 between machines.
 
@@ -81,6 +81,7 @@ between machines.
 | `interactive` | **Delegated** | none — browser sign-in | day-to-day, fresh workstations |
 | `secret_env` | **Application** | secret in `$ENTRA_CLIENT_SECRET` | scheduled runs |
 | `certificate` | **Application** | PEM on disk | scheduled runs, preferred over a secret |
+| `token_passthrough` | **Application** | non-exportable cert, private key never on disk | scheduled runs, preferred over `certificate` |
 
 ### The two permission types are not interchangeable
 
@@ -143,6 +144,62 @@ private key with no password (`certificate_pem_path` in `config.json`). Delete t
 once the `.pem` is confirmed working — `check_auth.py --auth-mode certificate` proves it —
 so the private key exists on disk in exactly one unencrypted file.
 
+### Generating a certificate for `token_passthrough` mode (no PEM on disk)
+
+Same idea as `certificate` mode — a cert-backed application credential — but the private
+key never leaves the Windows certificate store, not even briefly. Windows signs the token
+request internally; only the resulting bearer token (short-lived, ~1 hour) ever reaches
+Python.
+
+```powershell
+$cert = New-SelfSignedCertificate -Subject "CN=EntraAppCertNonExportable" `
+    -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy NonExportable `
+    -KeySpec Signature -KeyLength 2048 -KeyAlgorithm RSA -HashAlgorithm SHA256
+```
+
+`NonExportable` is the entire point here — this key can never be extracted into a `.pfx` or
+`.pem` afterward, by design. Export the public half the same way as `certificate` mode
+(`Export-Certificate`) and upload the resulting `.cer` under the app registration's
+**Certificates & secrets** tab; nothing else about the Entra-side setup changes.
+
+Two new fields go in `config.json`, alongside the ones `certificate` mode already uses:
+
+```json
+"auth": {
+    "token_env_var": "GRAPH_ACCESS_TOKEN",
+    "token_passthrough_thumbprint": "<thumbprint from Get-ChildItem Cert:\\CurrentUser\\My>"
+}
+```
+
+`token_passthrough_thumbprint` is deliberately a separate field from `certificate_thumbprint`
+— they can be, and here are, different certificates entirely.
+
+**Testing this standalone, before it's wired into anything else:**
+
+```powershell
+# PowerShell — reads client_id/tenant_id/thumbprint from config.json itself, nothing to type
+.\scripts\Get-GraphToken.ps1
+python scripts\check_auth.py --auth-mode token_passthrough
+```
+
+```bash
+# git-bash — Set-Item Env: only ever affects the powershell.exe child process itself, so
+# -Raw prints the bare token to stdout instead and bash captures it in its own environment
+export GRAPH_ACCESS_TOKEN=$(powershell.exe -NoProfile -File ./scripts/Get-GraphToken.ps1 -Raw)
+python scripts/check_auth.py --auth-mode token_passthrough
+```
+
+Two things worth knowing before scheduling this unattended:
+
+- **Requires PowerShell 7+ (`pwsh`), not Windows PowerShell 5.1.** `powershell.exe` on
+  Windows is always 5.1 regardless of what else is installed or what a terminal defaults to
+  interactively; MSAL.PS 4.x needs Core edition and fails under 5.1 with a confusing cascade
+  (`Import-PowerShellDataFile` not found, then type-not-found errors) rather than a clear
+  version message. `run_export.cmd` calls `pwsh` explicitly and refuses to fall back to 5.1.
+- **The token is not auto-renewed.** It expires in under an hour; a scheduled task must run
+  `Get-GraphToken.ps1` and `run_month.py` back-to-back in the same job, every time —
+  `run_export.cmd` already does this when `auth.mode` is `token_passthrough`.
+
 ### Token cache
 
 With `auth.cache_tokens: true` the refresh token is cached so re-runs are silent for days.
@@ -152,20 +209,27 @@ Windows, `~/.cache/entra-pim-review/` elsewhere. **That file is a credential.** 
 
 ## Before you schedule anything unattended
 
-Run the preflight in both modes. One passing proves nothing about the other, because they
-exercise different permission types:
+Run the preflight in both a delegated and an unattended mode. One passing proves nothing
+about the other, because they exercise different permission types:
 
 ```bash
-python scripts/check_auth.py                          # delegated
-python scripts/check_auth.py --auth-mode secret_env   # application
+python scripts/check_auth.py                              # delegated
+python scripts/check_auth.py --auth-mode secret_env        # application
+python scripts/check_auth.py --auth-mode token_passthrough # application, no PEM on disk
 ```
 
-Only when both are green, point Task Scheduler at `scripts/run_export.cmd` (monthly, day 2,
-early — retention is short). Note that **Task Scheduler does not inherit environment
-variables from your shell**, so `$env:ENTRA_CLIENT_SECRET` set interactively will not be
-visible to it. Use `setx` for a persistent variable, or switch to `certificate` mode, or best
-of all run the export from Azure Automation with a managed identity and keep no credential on
-the machine at all.
+Only when both are green, point Task Scheduler at `scripts/run_export.cmd`. It reads
+`auth.mode` from `config.json` itself — one script covers all three unattended modes, so
+switching which one is scheduled is a config change, not a different script. It refuses to
+run at all if `auth.mode` is `interactive`, since Task Scheduler has no browser to complete
+that flow. Schedule it monthly, day 2, early — retention is short.
+
+Note that **Task Scheduler does not inherit environment variables from your shell**, so
+`$env:ENTRA_CLIENT_SECRET` set interactively will not be visible to it. Use `setx` for a
+persistent variable, or switch to `certificate` or `token_passthrough` mode — both avoid a
+standing secret on the machine, and `token_passthrough` avoids a plaintext private key on
+disk as well. Best of all, run the export from Azure Automation with a managed identity and
+keep no credential on the machine at all.
 
 ## Running a cycle
 
